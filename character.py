@@ -1,5 +1,5 @@
 # character.py
-# Complete Spaz Character Engine with Weapon Cycling & Clean Idle Kinematics
+# Complete PuppetCharacter Engine with Procedural IK, Weapon Cycling & Zero-Drift
 import math, random
 from panda3d.core import Vec3, TransformState, Point3
 from panda3d.bullet import (BulletRigidBodyNode, BulletCapsuleShape, ZUp)
@@ -21,7 +21,7 @@ def box_normalize_to_circle(lr, ud):
     return lr * fin_scale, ud * fin_scale
 
 
-class SpazCharacter:
+class PuppetCharacter:
 
     def __init__(self, world, render, loader, start_pos=(0, 0, 0)):
         self.world         = world
@@ -43,7 +43,7 @@ class SpazCharacter:
         self.balance       = MAX_BALANCE
         self.footing       = True
 
-        # Exact BombSquad 3-Phase Punch state
+        # Exact 3-Phase Spring Punch state
         self.punch_timer     = 0.0
         self.punch_right     = False
         self.punch_cooldown  = 0.0
@@ -89,7 +89,7 @@ class SpazCharacter:
         total_height = TORSO_HEIGHT + PELVIS_HEIGHT + LEG_LENGTH
         capsule_shape = BulletCapsuleShape(TORSO_RADIUS * 1.05, total_height * 0.5, ZUp)
 
-        node = BulletRigidBodyNode("spaz_main")
+        node = BulletRigidBodyNode("puppet_main")
         node.setMass(6.0)
         node.addShape(capsule_shape)
         node.setLinearDamping(0.15)
@@ -109,7 +109,7 @@ class SpazCharacter:
         self.head_pivot = self.torso_pivot.attachNewNode("head_pivot")
         self.head_pivot.setPos(0, 0, TORSO_HEIGHT * 0.48 + HEAD_RADIUS * 0.85)
 
-        # PUBG Back Holster Sockets (Spine Mounts)
+        # Back Holster Sockets (Spine Mounts)
         self.back_holster_sockets = {
             1: self.torso_pivot.attachNewNode("holster_slot1"),
             2: self.torso_pivot.attachNewNode("holster_slot2"),
@@ -463,7 +463,6 @@ class SpazCharacter:
         rad = math.radians(self.facing)
         return Vec3(-math.sin(rad), math.cos(rad), 0)
 
-    # ── MAIN UPDATE PASS ──────────────────────────────────────────────────────
     def apply_movement(self, world_mx, world_my, do_jump, is_sprinting, is_shooting_held, dt, cam_yaw, target_3d_point):
         self.anim_time += dt
         self.aim_target_3d = target_3d_point
@@ -486,7 +485,6 @@ class SpazCharacter:
         if self.gun_recoil_pitch > 0:
             self.gun_recoil_pitch = max(0.0, self.gun_recoil_pitch - dt * 90.0)
 
-        # Reload countdown
         if self.is_reloading:
             self.reload_timer -= dt
             if self.reload_timer <= 0:
@@ -495,26 +493,22 @@ class SpazCharacter:
                 if gun:
                     gun.reload()
 
-        # Continuous Full-Auto Firing
         if is_shooting_held and self.is_holding_gun():
             active_gun = self.get_active_gun()
             if active_gun and active_gun.cfg["is_auto"]:
                 self.trigger_fire(target_3d_point)
 
-        # Smooth lift interpolation
         if self.held_prop and self.lift_progress < 1.0:
             self.lift_progress = min(1.0, self.lift_progress + dt / PICKUP_LIFT_TIME)
 
         body = self.physics_body
         cur_v = body.getLinearVelocity()
 
-        # Safety Clamping
         cur_speed = cur_v.length()
         if cur_speed > MAX_LINEAR_VELOCITY:
             cur_v = cur_v * (MAX_LINEAR_VELOCITY / cur_speed)
             body.setLinearVelocity(cur_v)
 
-        # Footing & Balance
         pos_z = self.root_np.getPos().z
         self.footing = (pos_z <= 0.65 and abs(cur_v.z) < 1.5)
 
@@ -546,7 +540,6 @@ class SpazCharacter:
         target_gas = (horiz_speed / speed_limit) if is_moving else 0.0
         self.run_gas += (target_gas - self.run_gas) * min(1.0, dt * 12.0)
 
-        # ── TACTICAL STRAFE vs RUNNING ORIENTATION ──
         if self.is_holding_gun():
             cur_h = self.root_np.getH()
             self.turn_diff = (cam_yaw - cur_h + 180.0) % 360.0 - 180.0
@@ -576,7 +569,6 @@ class SpazCharacter:
             target_vx = 0.0
             target_vy = 0.0
 
-        # Snappy instant directional acceleration & clean zero-drift stop
         if is_moving:
             accel = 6.0 if self.ice_mode else ACCEL_RATE
             new_vx = cur_v.x + (target_vx - cur_v.x) * min(1.0, dt * accel)
@@ -590,7 +582,6 @@ class SpazCharacter:
 
         body.setLinearVelocity(Vec3(new_vx, new_vy, cur_v.z))
 
-        # Jump
         if do_jump and self.jump_ready and self.footing:
             body.setLinearVelocity(Vec3(new_vx, new_vy, JUMP_VELOCITY))
             self.jump_ready = False
@@ -603,7 +594,6 @@ class SpazCharacter:
         if not do_jump:
             self.jump_ready = True
 
-        # ── PUBG BACK-HOLSTER & ACTIVE WEAPON MOUNTING ──
         torso_pos = self.root_np.getPos()
         fwd = self.get_forward_vector()
 
@@ -618,7 +608,6 @@ class SpazCharacter:
                 gun.set_pos(holster_socket.getPos(self.render))
                 gun.set_hpr(holster_socket.getHpr(self.render))
 
-        # Generic Crate / Pin Overhead Position
         if self.held_prop:
             lift_s = math.sin(self.lift_progress * math.pi * 0.5)
             stride_bob  = math.sin(self.roll_amt * 2.0) * 0.02 * self.run_gas
@@ -630,7 +619,6 @@ class SpazCharacter:
             pos = torso_pos + fwd * fwd_offset + Vec3(stride_sway, 0, cur_z)
             self.held_prop.set_pos(pos)
 
-        # Dynamic Expression & Punch Brow
         if (horiz_speed >= 5.0 or self.punch_timer > 0.0 or self.is_holding_gun()):
             target_eyelid_angle = 28.0
         elif not self.footing:
@@ -640,7 +628,6 @@ class SpazCharacter:
 
         self.eyelid_angle += (target_eyelid_angle - self.eyelid_angle) * min(1.0, dt * 8.0)
 
-        # Blink
         if self.anim_time >= self.next_blink_time:
             self.blink_val = 1.0
             self.next_blink_time = self.anim_time + random.uniform(2.5, 5.0)
@@ -663,7 +650,6 @@ class SpazCharacter:
         self._update_layered_animation(dt, horiz_speed, is_sprinting, target_3d_point)
 
     def _update_layered_animation(self, dt, speed, is_sprinting, target_3d_point):
-        # 1. LEGS CHANNEL
         if self.footing:
             if speed > 0.3:
                 stride_mult = (1.5 if self.ice_mode else (3.2 if is_sprinting else 2.4))
@@ -689,7 +675,6 @@ class SpazCharacter:
             self.leg_pivots["left"].setHpr(0, kick, -8.0)
             self.leg_pivots["right"].setHpr(0, -kick, 8.0)
 
-        # 2. ARMS CHANNEL (Exact 3-Phase BombSquad Punch from spaz_node.cc:2760)
         if self.is_holding_gun():
             torso_pos = self.root_np.getPos()
             aim_vec = (target_3d_point - (torso_pos + Vec3(0, 0, 0.38))).normalized()
@@ -764,7 +749,6 @@ class SpazCharacter:
             self.arm_pivots["left"].setHpr(0, -65.0 + wave1, -25.0)
             self.arm_pivots["right"].setHpr(0, -65.0 - wave1, 25.0)
 
-        # 3. TORSO CHANNEL
         if self.is_holding_gun():
             torso_pos = self.root_np.getPos()
             aim_vec = (target_3d_point - (torso_pos + Vec3(0, 0, 0.38))).normalized()
@@ -815,7 +799,6 @@ class SpazCharacter:
             self.torso_pivot.setPos(0, 0, 0)
             self.torso_pivot.setHpr(0, -8.0, 0)
 
-        # 4. HEAD CHANNEL
         if self.is_holding_gun():
             torso_pos = self.root_np.getPos()
             aim_vec = (target_3d_point - (torso_pos + Vec3(0, 0, 0.38))).normalized()

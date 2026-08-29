@@ -1,20 +1,30 @@
-# 🥊 SpazEngine — Procedural Physics & Tactical TPS Action Engine
+# 🥊 PuppetEngine — Procedural Physics & Tactical TPS Action Engine
+
+> **The One & Only Procedural Spring-Damper Physics & Tactical Third-Person Shooter (TPS) Engine Built in Pure Python.**
 
 [![Python 3.10+](https://img.shields.io/badge/Python-3.10%2B-3776AB?style=for-the-badge&logo=python&logoColor=white)](https://www.python.org/)
 [![Panda3D](https://img.shields.io/badge/Render-Panda3D-E10098?style=for-the-badge&logo=panda3d&logoColor=white)](https://www.panda3d.org/)
 [![Bullet Physics](https://img.shields.io/badge/Physics-Bullet_3D-FF6F00?style=for-the-badge)](https://pybullet.org/)
 [![Zero Asset Bloat](https://img.shields.io/badge/Assets-100%25_Procedural-00C853?style=for-the-badge)](#)
+[![Development Status](https://img.shields.io/badge/Status-Active%20In--Progress-FFA000?style=for-the-badge)](#)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg?style=for-the-badge)](LICENSE)
 
-An ultra-lightweight (**< 100 KB**), clean-room **3D procedural character physics and tactical third-person shooter (TPS) engine** built in pure Python.
+An ultra-lightweight (**< 100 KB**), clean-room **3D procedural character physics and tactical third-person shooter (TPS) engine** built in pure Python with zero external 3D asset downloads.
 
-SpazEngine fuses the **organic clay-puppet physics and procedural spring-damper animation of BombSquad (Ballistica)** with **AAA PUBG-style over-the-shoulder tactical shooting, visible back-holstering, two-ray pinpoint aiming, and kinetic ballistics**.
+PuppetEngine fuses the **organic clay-puppet physics and procedural spring-damper animation of BombSquad (Ballistica)** with **AAA PUBG-style over-the-shoulder tactical shooting, visible back-holstering, two-ray pinpoint aiming, and kinetic ballistics**.
+
+---
+
+> [!IMPORTANT]
+> **🚧 Development Status: Active In-Progress**
+> PuppetEngine is currently under active development. Core character physics, layered multi-actions, two-ray parallax-free aiming, and procedural weapons are fully functional, with ongoing improvements to multiplayer networking, AI behaviors, and arena hazard systems.
 
 ---
 
 ## 🌟 Key Highlights & Innovations
 
-- **🚀 100% Procedural & Self-Contained:** Zero external 3D mesh or audio file downloads. Every weapon model (Pistol, M4 Rifle, SPAS Shotgun) is generated mathematically, and all sound effects are synthesized in real-time using raw waveform algorithms.
+- **🥇 The One & Only in Python:** There is currently no other open-source engine in Python combining procedural spring-damper puppet ragdoll animation with a full PUBG-style TPS arsenal.
+- **🚀 100% Procedural & Self-Contained:** Zero external 3D mesh or audio file downloads. Every weapon model (Tactical Pistol, M4 Carbine, SPAS Shotgun) is generated mathematically, and all sound effects are synthesized in real-time using raw waveform algorithms.
 - **🧠 Reverse-Engineered Ballistica Mechanics:** Clean-room mathematical implementation of `BoxNormalizeToCircle`, dynamic footing/balance decay, 3-phase anticipation punch dynamics, overhead item lifting/clasping, and low-friction hockey skating.
 - **🎯 Industry-Standard Two-Ray Aiming:** Eliminates parallax error by casting a camera sightline ray through the screen center crosshair and mapping physical bullet trajectories directly to the 3D impact point.
 - **🎒 PUBG-Style Visible Back-Holster System:** Weapons stored in inventory but not active in hands are realistically slung across the spine sockets on the character's back.
@@ -22,9 +32,9 @@ SpazEngine fuses the **organic clay-puppet physics and procedural spring-damper 
 
 ---
 
-## 📊 Comparative Analysis: What Makes SpazEngine Unique?
+## 📊 Comparative Analysis: What Makes PuppetEngine Unique?
 
-| Feature | Standard Game Engines (Unity/Unreal) | Traditional Panda3D Demos | **SpazEngine** |
+| Feature | Standard Game Engines (Unity/Unreal) | Traditional Panda3D Demos | **PuppetEngine** |
 |:---|:---:|:---:|:---:|
 | **Engine Footprint** | 15 GB – 35 GB | ~50 MB | **< 100 KB Pure Code** |
 | **Boot & Load Time** | 10 – 30 seconds | 2 – 5 seconds | **< 0.5 seconds** |
@@ -45,7 +55,7 @@ $$\\vec{v}_{\\text{norm}} = \\vec{v}_{\\text{raw}} \\cdot \\frac{1}{\\sqrt{\\lef
 ### 2. Dynamic Footing & Balance System
 Character stability is measured from $0$ to $255$ balance points. In mid-air or during high-impact stumbles, balance decays, triggering flailing bicycle kicks until stable footing is restored on ground contacts.
 
-### 3. 3-Phase BombSquad Punch Physics (`spaz_node.cc:2760`)
+### 3. 3-Phase Spring Punch Physics
 1. **Anticipation Phase ($0\\text{ ms} - 80\\text{ ms}$):** Arm winds back behind shoulder ($\\theta = +25^\\circ$), torso coils backward ($-15^\\circ$), non-punching fist anchors to chest.
 2. **Maximum Velocity Forward Thrust ($80\\text{ ms} - 200\\text{ ms}$):** Fist rockets forward $0.70\\text{ m}$ ($\\theta = -90^\\circ$), torso violently twists forward ($+24^\\circ$).
 3. **Damped Spring Recovery ($200\\text{ ms} - 300\\text{ ms}$):** Spring-damper forces smoothly return limbs and torso to neutral idle stance.
@@ -102,8 +112,8 @@ Character stability is measured from $0$ to $255$ balance points. In mid-air or 
 ### 2. Launch Sandbox
 ```bash
 # Clone repository
-git clone https://github.com/arjncx-lang/spaz_engine.git
-cd spaz_engine
+git clone https://github.com/arjncx-lang/puppet-engine.git
+cd puppet-engine
 
 # Run game sandbox
 python main.py
@@ -115,12 +125,12 @@ python main.py
 ## 📂 Project Structure
 
 ```
-spaz_engine/
-├── character.py          # Complete Spaz character engine, procedural IK & inventory
+puppet-engine/
+├── character.py          # Complete PuppetCharacter engine, procedural IK & inventory
 ├── props.py              # Sharp 3D procedural weapon models, crates & bowling pins
 ├── physics_constants.py  # Tuned world physics, limits & safety clamping constants
-├── main.py               # ShowBase loop, TPS camera gimbal, crosshair & HUD
-├── README.md             # Complete documentation and mathematical breakdown
+├── main.py               # PuppetEngine ShowBase loop, TPS camera gimbal, crosshair & HUD
+├── README.md             # Complete documentation, math & architecture breakdown
 ├── LICENSE               # MIT License
 ├── run.bat               # Windows quick launch batch script
 └── sfx/                  # Procedural waveform audio files (gunshots, punches, reloads)

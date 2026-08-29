@@ -1,4 +1,4 @@
-# main.py  -  SpazEngine: PUBG Style Weapon Switching & Multi-Angle Camera
+# main.py  -  PuppetEngine: Procedural Physics & Tactical TPS Action Sandbox
 # Controls:
 #   Mouse Move         : Free Look (360° Horizontal + Full Vertical Pitch)
 #   Left Click (Hold)  : Continuous Full-Auto (Rifle) / Semi-Auto (Pistol/Shotgun)
@@ -24,10 +24,10 @@ from panda3d.bullet import BulletWorld, BulletPlaneShape, BulletRigidBodyNode
 from direct.gui.OnscreenText import OnscreenText
 
 from physics_constants import *
-from character import SpazCharacter, box_normalize_to_circle
+from character import PuppetCharacter, box_normalize_to_circle
 from props import InteractiveCrate, BowlingPin, GunWeapon
 
-loadPrcFileData("", "window-title SpazEngine - Full Control Arsenal Sandbox")
+loadPrcFileData("", "window-title PuppetEngine - Pure Python TPS & Physics Sandbox")
 loadPrcFileData("", "win-size 1280 720")
 loadPrcFileData("", "sync-video 1")
 
@@ -88,7 +88,7 @@ class DustPuff:
         return True
 
 
-class SpazEngine(ShowBase):
+class PuppetEngine(ShowBase):
 
     def __init__(self):
         super().__init__()
@@ -96,15 +96,12 @@ class SpazEngine(ShowBase):
         self.setBackgroundColor(0.14, 0.17, 0.24, 1)
         self.render.setAntialias(AntialiasAttrib.MAuto)
 
-        # ── Bullet physics world ──
         self.bullet = BulletWorld()
         self.bullet.setGravity(Vec3(0, 0, GRAVITY))
 
-        # ── Ground arena & Lights ──
         self._make_ground()
         self._make_lights()
 
-        # ── Sound Effects ──
         self.sounds = {}
         sfx_dir = pathlib.Path(__file__).parent / "sfx"
         for sfx_name in ("punch_whoosh", "punch_hit", "jump", "throw", "stun",
@@ -113,22 +110,19 @@ class SpazEngine(ShowBase):
             if p.exists():
                 self.sounds[sfx_name] = self.loader.loadSfx(str(p))
 
-        # ── Spaz Character ──
-        self.spaz = SpazCharacter(self.bullet, self.render, self.loader, (0, 0, 0))
-        self.spaz.set_dust_callback(self.spawn_dust)
-        self.spaz.set_sfx_callback(self.play_sfx)
-        self.spaz.set_shoot_callback(self._execute_bullet_fire)
+        # ── Puppet Character ──
+        self.puppet = PuppetCharacter(self.bullet, self.render, self.loader, (0, 0, 0))
+        self.puppet.set_dust_callback(self.spawn_dust)
+        self.puppet.set_sfx_callback(self.play_sfx)
+        self.puppet.set_shoot_callback(self._execute_bullet_fire)
 
-        # ── Interactive Props & Weapons ──
         self.props = []
         self._spawn_props()
 
-        # ── VFX Lists ──
         self.dust_puffs = []
         self.tracers    = []
         self.flashes    = []
 
-        # ── Drop Shadow ──
         cm = CardMaker("shadow")
         cm.setFrame(-0.35, 0.35, -0.35, 0.35)
         self.shadow_np = self.render.attachNewNode(cm.generate())
@@ -136,8 +130,8 @@ class SpazEngine(ShowBase):
         self.shadow_np.setColor(0.08, 0.16, 0.08, 0.6)
         self.shadow_np.setPos(0, 0, 0.004)
 
-        # ── 3-Stage Camera Zoom Presets (V Key) ──
-        self.cam_zoom_presets = [4.2, 7.0, 11.5]  # [1: Close Aim, 2: Normal Action, 3: Wide Overview]
+        # 3-Stage Camera Zoom Presets (V Key)
+        self.cam_zoom_presets = [4.2, 7.0, 11.5]
         self.cam_zoom_index   = 1
         self.cam_target_dist  = self.cam_zoom_presets[self.cam_zoom_index]
         self.cam_dist         = self.cam_target_dist
@@ -157,18 +151,15 @@ class SpazEngine(ShowBase):
         self._set_mouse_lock(True)
         self._bind_actions()
 
-        # ── Dynamic Crosshair (+) ──
         self.crosshair = OnscreenText(
             text="+", pos=(0, 0.005), scale=0.065, fg=(1, 1, 0.2, 0.95),
             align=TextNode.ACenter, mayChange=True)
         self.crosshair.hide()
 
-        # ── Contextual Proximity Prompt UI ──
         self.prompt_text = OnscreenText(
             text="", pos=(0, -0.22), scale=0.046, fg=(1.0, 0.95, 0.3, 1.0),
             shadow=(0, 0, 0, 0.8), align=TextNode.ACenter, mayChange=True)
 
-        # ── Weapon & Ammo HUD (Bottom Right) ──
         self.hud_ammo = OnscreenText(
             text="👊 UNARMED", pos=(0.90, -0.86), scale=0.048, fg=(1, 1, 1, 0.95),
             shadow=(0, 0, 0, 0.8), align=TextNode.ARight, mayChange=True)
@@ -178,13 +169,11 @@ class SpazEngine(ShowBase):
             pos=(0, -0.88), scale=0.036, fg=(0.7, 0.85, 1.0, 0.90),
             align=TextNode.ACenter, mayChange=True)
 
-        # ── HUD Instructions ──
         OnscreenText(
             text="Mouse: Look | LMB: Shoot/Punch | Wheel / +/-: Switch Gun | V: Camera Zoom (3 Angles) | R: Reload",
             pos=(0, -0.95), scale=0.034, fg=(0.9, 0.9, 0.9, 0.85),
             align=TextNode.ACenter, mayChange=False)
 
-        # ── Main update loop ──
         self.taskMgr.add(self._update, "update")
 
     def _set_mouse_lock(self, lock):
@@ -202,7 +191,6 @@ class SpazEngine(ShowBase):
         self.dust_puffs.append(puff)
 
     def _cycle_camera_zoom(self):
-        """Cycles between 3 camera zoom angles (Close -> Normal -> Wide)."""
         self.cam_zoom_index = (self.cam_zoom_index + 1) % len(self.cam_zoom_presets)
         self.cam_target_dist = self.cam_zoom_presets[self.cam_zoom_index]
 
@@ -282,7 +270,6 @@ class SpazEngine(ShowBase):
         for pos in pin_pos:
             self.props.append(BowlingPin(self.bullet, self.render, self.loader, pos))
 
-        # ── PUBG ARSENAL WEAPON SPAWNS ──
         self.props.append(GunWeapon(self.bullet, self.render, self.loader, (-1.5, 0.8, 0.2), "pistol"))
         self.props.append(GunWeapon(self.bullet, self.render, self.loader, (0.0, 1.2, 0.2), "rifle"))
         self.props.append(GunWeapon(self.bullet, self.render, self.loader, (1.5, 0.8, 0.2), "shotgun"))
@@ -293,38 +280,38 @@ class SpazEngine(ShowBase):
     def _bind_actions(self):
         for pk in ("mouse1", "f", "F", "j", "J"): self.accept(pk, self._do_primary_click)
         for ek in ("mouse3", "e", "E"): self.accept(ek, self._do_pickup)
-        for rk in ("r", "R"): self.accept(rk, self.spaz.trigger_reload)
+        for rk in ("r", "R"): self.accept(rk, self.puppet.trigger_reload)
 
-        # ── MOUSE SCROLL & +/- WEAPON SWITCHING ──
-        self.accept("wheel_up",   lambda: self.spaz.cycle_weapon(1))
-        self.accept("wheel_down", lambda: self.spaz.cycle_weapon(-1))
-        self.accept("+",          lambda: self.spaz.cycle_weapon(1))
-        self.accept("=",          lambda: self.spaz.cycle_weapon(1))
-        self.accept("-",          lambda: self.spaz.cycle_weapon(-1))
-        self.accept("_",          lambda: self.spaz.cycle_weapon(-1))
+        # Mouse Scroll & +/- Weapon Switching
+        self.accept("wheel_up",   lambda: self.puppet.cycle_weapon(1))
+        self.accept("wheel_down", lambda: self.puppet.cycle_weapon(-1))
+        self.accept("+",          lambda: self.puppet.cycle_weapon(1))
+        self.accept("=",          lambda: self.puppet.cycle_weapon(1))
+        self.accept("-",          lambda: self.puppet.cycle_weapon(-1))
+        self.accept("_",          lambda: self.puppet.cycle_weapon(-1))
 
         # Direct Weapon Keys
-        self.accept("1", lambda: self.spaz.switch_weapon_slot(1))
-        self.accept("2", lambda: self.spaz.switch_weapon_slot(2))
-        self.accept("3", lambda: self.spaz.switch_weapon_slot(3))
+        self.accept("1", lambda: self.puppet.switch_weapon_slot(1))
+        self.accept("2", lambda: self.puppet.switch_weapon_slot(2))
+        self.accept("3", lambda: self.puppet.switch_weapon_slot(3))
 
-        # ── V KEY: 3-STAGE CAMERA ZOOM TOGGLE ──
+        # V Key: 3-Stage Camera Zoom Toggle
         for vk in ("v", "V"): self.accept(vk, self._cycle_camera_zoom)
 
-        for kk in ("k", "K"): self.accept(kk, lambda: self.spaz.trigger_knockout(1.5))
+        for kk in ("k", "K"): self.accept(kk, lambda: self.puppet.trigger_knockout(1.5))
         for hk in ("h", "H"): self.accept(hk, self._toggle_ice)
 
         self.accept("tab", lambda: self._set_mouse_lock(not self.mouse_locked))
         self.accept("escape", sys.exit)
 
     def _do_primary_click(self):
-        self.spaz.trigger_primary_action(self.props, self.current_3d_target)
+        self.puppet.trigger_primary_action(self.props, self.current_3d_target)
 
     def _do_pickup(self):
-        self.spaz.trigger_pickup(self.props)
+        self.puppet.trigger_pickup(self.props)
 
     def _toggle_ice(self):
-        is_ice = self.spaz.toggle_ice_mode()
+        is_ice = self.puppet.toggle_ice_mode()
         self.ground_node.setFriction(0.04 if is_ice else 0.50)
         if is_ice:
             self.gv.setColor(0.35, 0.65, 0.85, 1)
@@ -351,10 +338,10 @@ class SpazEngine(ShowBase):
         self.cam_dist += (self.cam_target_dist - self.cam_dist) * min(1.0, dt * 10.0)
 
         # ── DYNAMIC OVER-THE-SHOULDER CAMERA TRANSITION ──
-        target_shoulder = 0.55 if self.spaz.is_holding_gun() else 0.0
+        target_shoulder = 0.55 if self.puppet.is_holding_gun() else 0.0
         self.shoulder_x += (target_shoulder - self.shoulder_x) * min(1.0, dt * 10.0)
 
-        torso_pos = self.spaz.get_torso_pos()
+        torso_pos = self.puppet.get_torso_pos()
         target_pos = torso_pos + Vec3(0, 0, 0.45)
         self.cam_pivot.setPos(target_pos)
         self.cam_pivot.setH(self.cam_yaw)
@@ -399,17 +386,17 @@ class SpazEngine(ShowBase):
         world_mx = rgt_x * norm_x + fwd_x * norm_y
         world_my = rgt_y * norm_x + fwd_y * norm_y
 
-        self.spaz.apply_movement(world_mx, world_my, space_down, shift_down, lmb_held, dt, self.cam_yaw, self.current_3d_target)
+        self.puppet.apply_movement(world_mx, world_my, space_down, shift_down, lmb_held, dt, self.cam_yaw, self.current_3d_target)
 
         # ── CONTEXTUAL PROXIMITY PROMPTS ──
-        spaz_pos = self.spaz.get_torso_pos()
+        puppet_pos = self.puppet.get_torso_pos()
         nearest_prop = None
         min_dist = 1.65
 
         for prop in self.props:
             if getattr(prop, "is_held", False):
                 continue
-            d = (prop.get_pos() - spaz_pos).length()
+            d = (prop.get_pos() - puppet_pos).length()
             if d < min_dist:
                 min_dist = d
                 nearest_prop = prop
@@ -417,7 +404,7 @@ class SpazEngine(ShowBase):
         if nearest_prop:
             if getattr(nearest_prop, "is_gun", False):
                 g_type = nearest_prop.weapon_type
-                if g_type in self.spaz.weapons_inventory:
+                if g_type in self.puppet.weapons_inventory:
                     self.prompt_text.setText(f"[E / RMB] Take Ammo (+{nearest_prop.cfg['ammo_pickup']} Rounds)")
                 else:
                     self.prompt_text.setText(f"[E / RMB] Pick Up {nearest_prop.name}")
@@ -427,16 +414,16 @@ class SpazEngine(ShowBase):
             self.prompt_text.setText("")
 
         # ── WEAPON & AMMO HUD UPDATE ──
-        if self.spaz.is_holding_gun():
+        if self.puppet.is_holding_gun():
             self.crosshair.show()
-            gun = self.spaz.get_active_gun()
-            if self.spaz.is_reloading:
+            gun = self.puppet.get_active_gun()
+            if self.puppet.is_reloading:
                 self.hud_ammo.setText(f"🔫 {gun.name.upper()} | ⏳ RELOADING...")
             else:
                 self.hud_ammo.setText(f"🔫 {gun.name.upper()} | {gun.ammo_mag} / {gun.ammo_reserve}")
-        elif self.spaz.held_prop:
+        elif self.puppet.held_prop:
             self.crosshair.hide()
-            self.hud_ammo.setText(f"📦 HOLDING {self.spaz.held_prop.name.upper()}")
+            self.hud_ammo.setText(f"📦 HOLDING {self.puppet.held_prop.name.upper()}")
         else:
             self.crosshair.hide()
             self.hud_ammo.setText("👊 UNARMED (PUNCH)")
@@ -455,7 +442,7 @@ class SpazEngine(ShowBase):
         self.bullet.doPhysics(dt, 10, 1.0 / 180.0)
 
         # Update Drop Shadow
-        t_pos = self.spaz.get_torso_pos()
+        t_pos = self.puppet.get_torso_pos()
         self.shadow_np.setPos(t_pos.x, t_pos.y, 0.004)
         h_factor = max(0.1, 1.0 - (t_pos.z * 0.25))
         self.shadow_np.setScale(h_factor)
@@ -465,4 +452,4 @@ class SpazEngine(ShowBase):
 
 
 if __name__ == "__main__":
-    SpazEngine().run()
+    PuppetEngine().run()

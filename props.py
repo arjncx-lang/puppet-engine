@@ -39,7 +39,6 @@ class InteractiveCrate:
         if self.is_held == held: return
         self.is_held = held
         if held:
-            # Remove from Bullet world to prevent pushing/slow-walking character
             if self.world:
                 self.world.removeRigidBody(self.node)
         else:
@@ -109,9 +108,6 @@ class BowlingPin:
             self.node.applyCentralImpulse(impulse_vec)
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# REALISTIC WEAPON CONFIGURATIONS
-# ─────────────────────────────────────────────────────────────────────────────
 WEAPON_CONFIGS = {
     "pistol": {
         "name": "Tactical Heavy Pistol",
@@ -302,7 +298,6 @@ class GunWeapon:
         if self.is_held == held: return
         self.is_held = held
         if held:
-            # Remove from Bullet world to prevent pushing/slow-walking character
             if self.world:
                 self.world.removeRigidBody(self.node)
         else:

@@ -4,7 +4,7 @@
 # World gravity
 GRAVITY               = -20.0
 
-# Anatomical Spaz Dimensions
+# Anatomical Puppet Dimensions
 HEAD_RADIUS           = 0.22
 TORSO_RADIUS          = 0.15
 TORSO_HEIGHT          = 0.32
@@ -43,7 +43,7 @@ MAX_ANGULAR_VELOCITY  = 22.0   # Prevents physics glitch spins
 MAX_BALANCE           = 255    # Balance points when standing on stable footing
 
 # Combat & Pickups
-PUNCH_DURATION        = 0.30   # Exact BombSquad punch duration (s)
+PUNCH_DURATION        = 0.30   # 3-Phase spring punch duration (s)
 PUNCH_IMPULSE         = 22.0   # Normal punch impact force
 SPIN_PUNCH_MULT       = 2.4    # Multiplier for 360 Tornado Spin Punch
 PICKUP_RADIUS         = 1.55   # Search distance to lift objects / guns
