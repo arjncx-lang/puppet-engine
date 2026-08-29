@@ -1,4 +1,4 @@
-# PuppetEngine — Procedural Physics & Tactical TPS Action Engine
+# PuppetEngine - Procedural Physics & Tactical TPS Action Engine
 
 > **The One & Only Procedural Spring-Damper Physics & Tactical Third-Person Shooter (TPS) Engine Built in Pure Python.**
 
@@ -6,7 +6,7 @@
 [![Panda3D](https://img.shields.io/badge/Render-Panda3D-E10098?style=for-the-badge&logo=panda3d&logoColor=white)](https://www.panda3d.org/)
 [![Bullet Physics](https://img.shields.io/badge/Physics-Bullet_3D-FF6F00?style=for-the-badge)](https://pybullet.org/)
 [![Zero Asset Bloat](https://img.shields.io/badge/Assets-100%25_Procedural-00C853?style=for-the-badge)](#)
-[![Development Status](https://img.shields.io/badge/Status-Active%20In--Progress-FFA000?style=for-the-badge)](#)
+[![Development Status](https://img.shields.io/badge/Status-Active%20In-Progress-FFA000?style=for-the-badge)](#)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg?style=for-the-badge)](LICENSE)
 
 An ultra-lightweight (**< 100 KB**), clean-room **3D procedural character physics and tactical third-person shooter (TPS) engine** built in pure Python with zero external 3D asset downloads.
@@ -36,8 +36,8 @@ PuppetEngine fuses the **organic clay-puppet physics and procedural spring-dampe
 
 | Feature | Standard Game Engines (Unity/Unreal) | Traditional Panda3D Demos | **PuppetEngine** |
 |:---|:---:|:---:|:---:|
-| **Engine Footprint** | 15 GB – 35 GB | ~50 MB | **< 100 KB Pure Code** |
-| **Boot & Load Time** | 10 – 30 seconds | 2 – 5 seconds | **< 0.5 seconds** |
+| **Engine Footprint** | 15 GB to 35 GB | ~50 MB | **< 100 KB Pure Code** |
+| **Boot & Load Time** | 10 to 30 seconds | 2 to 5 seconds | **< 0.5 seconds** |
 | **Character Rigging** | Canned baked skeletal keyframes | Static rigid shapes | **Dynamic Spring-Damper Procedural IK** |
 | **Punch Mechanics** | Generic hitboxes | Simple collision overlap | **3-Phase Anticipation & Coil Physics** |
 | **Weapon System** | Downloaded 3D FBX assets | Rare / Basic cubes | **Procedural Multi-Part 3D Models + Holsters** |
