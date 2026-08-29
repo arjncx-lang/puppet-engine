@@ -1,4 +1,4 @@
-# 🥊 PuppetEngine — Procedural Physics & Tactical TPS Action Engine
+# PuppetEngine — Procedural Physics & Tactical TPS Action Engine
 
 > **The One & Only Procedural Spring-Damper Physics & Tactical Third-Person Shooter (TPS) Engine Built in Pure Python.**
 
@@ -16,23 +16,23 @@ PuppetEngine fuses the **organic clay-puppet physics and procedural spring-dampe
 ---
 
 > [!IMPORTANT]
-> **🚧 Development Status: Active In-Progress**
+> **Development Status: Active In-Progress**
 > PuppetEngine is currently under active development. Core character physics, layered multi-actions, two-ray parallax-free aiming, and procedural weapons are fully functional, with ongoing improvements to multiplayer networking, AI behaviors, and arena hazard systems.
 
 ---
 
-## 🌟 Key Highlights & Innovations
+## Key Highlights & Innovations
 
-- **🥇 The One & Only in Python:** There is currently no other open-source engine in Python combining procedural spring-damper puppet ragdoll animation with a full PUBG-style TPS arsenal.
-- **🚀 100% Procedural & Self-Contained:** Zero external 3D mesh or audio file downloads. Every weapon model (Tactical Pistol, M4 Carbine, SPAS Shotgun) is generated mathematically, and all sound effects are synthesized in real-time using raw waveform algorithms.
-- **🧠 Reverse-Engineered Ballistica Mechanics:** Clean-room mathematical implementation of `BoxNormalizeToCircle`, dynamic footing/balance decay, 3-phase anticipation punch dynamics, overhead item lifting/clasping, and low-friction hockey skating.
-- **🎯 Industry-Standard Two-Ray Aiming:** Eliminates parallax error by casting a camera sightline ray through the screen center crosshair and mapping physical bullet trajectories directly to the 3D impact point.
-- **🎒 PUBG-Style Visible Back-Holster System:** Weapons stored in inventory but not active in hands are realistically slung across the spine sockets on the character's back.
-- **⚡ Layered Simultaneous Action Channels:** Punch, sprint, jump, aim, and carry items simultaneously without action locking or animation cancellation.
+- **The One & Only in Python:** There is currently no other open-source engine in Python combining procedural spring-damper puppet ragdoll animation with a full PUBG-style TPS arsenal.
+- **100% Procedural & Self-Contained:** Zero external 3D mesh or audio file downloads. Every weapon model (Tactical Pistol, M4 Carbine, SPAS Shotgun) is generated mathematically, and all sound effects are synthesized in real-time using raw waveform algorithms.
+- **Reverse-Engineered Ballistica Mechanics:** Clean-room mathematical implementation of `BoxNormalizeToCircle`, dynamic footing/balance decay, 3-phase anticipation punch dynamics, overhead item lifting/clasping, and low-friction hockey skating.
+- **Industry-Standard Two-Ray Aiming:** Eliminates parallax error by casting a camera sightline ray through the screen center crosshair and mapping physical bullet trajectories directly to the 3D impact point.
+- **PUBG-Style Visible Back-Holster System:** Weapons stored in inventory but not active in hands are realistically slung across the spine sockets on the character's back.
+- **Layered Simultaneous Action Channels:** Punch, sprint, jump, aim, and carry items simultaneously without action locking or animation cancellation.
 
 ---
 
-## 📊 Comparative Analysis: What Makes PuppetEngine Unique?
+## Comparative Analysis: What Makes PuppetEngine Unique?
 
 | Feature | Standard Game Engines (Unity/Unreal) | Traditional Panda3D Demos | **PuppetEngine** |
 |:---|:---:|:---:|:---:|
@@ -45,7 +45,7 @@ PuppetEngine fuses the **organic clay-puppet physics and procedural spring-dampe
 
 ---
 
-## 📐 Mathematical & Physics Architecture
+## Mathematical & Physics Architecture
 
 ### 1. Vector Normalization (`BoxNormalizeToCircle`)
 Eliminates diagonal speed exploits (e.g. $W+D$ moving $\sqrt{2} \times$ faster) while preserving analog stick fidelity:
@@ -69,7 +69,7 @@ Character stability is measured from $0$ to $255$ balance points. In mid-air or 
 
 ---
 
-## 🔫 Weapon Arsenal Breakdown
+## Weapon Arsenal Breakdown
 
 ```
 [1] Tactical Heavy Pistol      [2] M4 Spec-Ops Assault Rifle    [3] SPAS Combat Shotgun
@@ -80,7 +80,7 @@ Character stability is measured from $0$ to $255$ balance points. In mid-air or 
 
 ---
 
-## 🎮 Controls & Gameplay Guide
+## Controls & Gameplay Guide
 
 | Control | Action | Details |
 |---|---|---|
@@ -100,7 +100,7 @@ Character stability is measured from $0$ to $255$ balance points. In mid-air or 
 
 ---
 
-## 🛠️ Installation & Running
+## Installation & Running
 
 ### 1. Prerequisites
 - **Python 3.10+**
@@ -122,7 +122,7 @@ python main.py
 
 ---
 
-## 📂 Project Structure
+## Project Structure
 
 ```
 puppet-engine/
@@ -138,5 +138,5 @@ puppet-engine/
 
 ---
 
-## 📄 License
+## License
 This project is released under the **MIT License**. Free for educational, commercial, and personal use.
