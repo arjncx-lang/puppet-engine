@@ -41,6 +41,48 @@ JUMP_VELOCITY         = 10.5   # Upward jump velocity (m/s)
 MAX_LINEAR_VELOCITY   = 24.0   # Prevents collision impulse explosions / tunneling
 MAX_ANGULAR_VELOCITY  = 22.0   # Prevents physics glitch spins
 MAX_BALANCE           = 255    # Balance points when standing on stable footing
+MAX_KINETIC_ENERGY    = 2800.0 # Prevents singularity energy explosions
+
+# Exact 2nd-Order Spring-Damper Oscillator Frequencies (rad/s) and Damping Ratios
+SPRING_OMEGA_TORSO    = 18.0   # Torso orientation response speed
+SPRING_ZETA_TORSO     = 0.95   # Subtle organic bounce (0.95 ~ critical)
+SPRING_OMEGA_HEAD     = 22.0   # Head gaze tracking speed
+SPRING_ZETA_HEAD      = 1.00   # Critically damped (zero overshoot)
+SPRING_OMEGA_WEAPON   = 24.0   # Weapon sway and recoil settle speed
+SPRING_ZETA_WEAPON    = 0.88   # Snappy organic recoil recovery
+SPRING_OMEGA_CAM      = 14.0   # Camera spring-arm tracking
+SPRING_ZETA_CAM       = 1.00   # Critically damped camera follow
+
+# Biomechanical Inverted Pendulum Lean & Bank Limits
+BANK_MAX_DEG          = 25.0   # Max inward roll angle on cornering
+PITCH_MAX_DEG         = 20.0   # Max longitudinal pitch angle under acceleration/braking
+
+# Virtual Pneumatic Ground Suspension
+SUSPENSION_REST_DIST  = 0.48   # Target ride height above ground
+SUSPENSION_K          = 480.0  # Spring stiffness (N/m)
+SUSPENSION_C          = 38.0   # Damping coefficient (N*s/m)
+MAX_WALKABLE_SLOPE    = 48.0   # Maximum walkable slope in degrees
+
+# Cycloidal Gait Kinematics (Zero Foot Slip)
+GAIT_STRIDE_BASE      = 0.65   # Neutral stride length (m)
+GAIT_STRIDE_SPRINT    = 0.95   # Sprint stride length (m)
+GAIT_STEP_HEIGHT      = 0.12   # Peak foot lift during swing phase (m)
+
+# Aerodynamic Drag & Rotational Damping
+AERO_DRAG_COEFF       = 0.040  # Quadratic air resistance on thrown props
+ROT_DRAG_COEFF        = 0.050  # Rotational air resistance on tumbling props
+
+# Camera (Over-the-shoulder TPS free look)
+CAM_DISTANCE          = 7.0
+CAM_SENSITIVITY       = 0.16
+CAM_FOV_BASE          = 60.0   # Normal field of view (deg)
+CAM_FOV_SPRINT        = 72.0   # High-speed sprint field of view (deg)
+CAM_COLLISION_MARGIN  = 0.25   # Distance buffer when camera hits walls
+
+# Lissajous Weapon Sway
+SWAY_FREQ             = 1.6    # Breathing frequency (rad/s)
+SWAY_AMP_X            = 0.012  # Horizontal breathing drift (m)
+SWAY_AMP_Z            = 0.008  # Vertical breathing drift (m)
 
 # Combat & Pickups
 PUNCH_DURATION        = 0.30   # 3-Phase spring punch duration (s)
@@ -50,7 +92,3 @@ PICKUP_RADIUS         = 1.55   # Search distance to lift objects / guns
 PICKUP_LIFT_TIME      = 0.20   # Time for smooth lift from floor to overhead (s)
 THROW_VELOCITY        = 13.5   # Forward launch speed for thrown objects
 THROW_UP_VELOCITY     = 5.2    # Upward arc for thrown objects
-
-# Camera (Over-the-shoulder TPS free look)
-CAM_DISTANCE          = 7.0
-CAM_SENSITIVITY       = 0.16

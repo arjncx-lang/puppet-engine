@@ -1,24 +1,26 @@
 # character.py
-# Complete PuppetCharacter Engine with Procedural IK, Weapon Cycling & Zero-Drift
+# Complete PuppetCharacter Engine with Procedural IK, Exact Spring-Dampers & Physics Biomechanics
 import math, random
 from panda3d.core import Vec3, TransformState, Point3
 from panda3d.bullet import (BulletRigidBodyNode, BulletCapsuleShape, ZUp)
 from physics_constants import *
-
-
-def box_normalize_to_circle(lr, ud):
-    if abs(lr) < 0.0001 or abs(ud) < 0.0001:
-        mag = math.hypot(lr, ud)
-        if mag > 1.0:
-            return lr / mag, ud / mag
-        return lr, ud
-
-    s = 1.0 / abs(lr) if abs(lr) > abs(ud) else 1.0 / abs(ud)
-    proj_lr = lr * s
-    proj_ud = ud * s
-    proj_len = math.sqrt(proj_lr * proj_lr + proj_ud * proj_ud)
-    fin_scale = 1.0 / proj_len
-    return lr * fin_scale, ud * fin_scale
+from physics_math import (
+    box_normalize_to_circle,
+    SpringDamper1D,
+    SpringDamper3D,
+    calculate_centrifugal_bank_angle,
+    calculate_longitudinal_pitch_angle,
+    calculate_ground_suspension_force,
+    calculate_slope_slip_force,
+    cycloidal_step_displacement,
+    calculate_lissajous_sway,
+    clamp_kinetic_energy,
+    SquashStretchSystem,
+    calculate_slope_foot_alignment,
+    ProceduralWeaponController,
+    solve_two_bone_ik_3d,
+)
+from props import make_sharp_box
 
 
 class PuppetCharacter:
@@ -39,9 +41,33 @@ class PuppetCharacter:
         # Ice mode
         self.ice_mode      = False
 
-        # Balance & Footing
-        self.balance       = MAX_BALANCE
-        self.footing       = True
+        # Balance, Grounding & Raycast Suspension
+        self.balance        = MAX_BALANCE
+        self.footing        = True
+        self.ground_normal  = Vec3(0, 0, 1)
+        self.ground_dist    = SUSPENSION_REST_DIST
+
+        # Biomechanical Acceleration & Bank Tracking
+        self.prev_planar_vel = Vec3(0, 0, 0)
+        self.forward_accel   = 0.0
+        self.gait_phase      = 0.0
+
+        # Exact 2nd-Order Spring-Damper Stabilizers
+        self.torso_hpr_spring = SpringDamper3D((0.0, 0.0, 0.0), omega=SPRING_OMEGA_TORSO, zeta=SPRING_ZETA_TORSO)
+        self.torso_pos_spring = SpringDamper3D((0.0, 0.0, 0.0), omega=SPRING_OMEGA_TORSO, zeta=SPRING_ZETA_TORSO)
+        self.head_hpr_spring  = SpringDamper3D((0.0, 0.0, 0.0), omega=SPRING_OMEGA_HEAD, zeta=SPRING_ZETA_HEAD)
+        self.gun_recoil_spring = SpringDamper1D(0.0, omega=SPRING_OMEGA_WEAPON, zeta=SPRING_ZETA_WEAPON)
+        self.gun_sway_spring  = SpringDamper3D((0.0, 0.0, 0.0), omega=SPRING_OMEGA_WEAPON, zeta=0.92)
+
+        # Procedural Squash & Stretch + Terrain Slope Foot Alignment (Overgrowth Techniques)
+        self.squash_system     = SquashStretchSystem(omega=24.0, zeta=0.68)
+        self.foot_pitch_spring = SpringDamper1D(0.0, omega=18.0, zeta=1.0)
+        self.foot_roll_spring  = SpringDamper1D(0.0, omega=18.0, zeta=1.0)
+        self.spine_flex_spring = SpringDamper1D(0.0, omega=16.0, zeta=1.0)
+
+        # 6-DOF Procedural Weapon Recoil & Sweep Inertia
+        self.weapon_dynamics   = ProceduralWeaponController()
+        self.cam_prev_yaw      = 180.0
 
         # Exact 3-Phase Spring Punch state
         self.punch_timer     = 0.0
@@ -79,6 +105,7 @@ class PuppetCharacter:
         self.dust_callback   = None
         self.sfx_callback    = None
         self.shoot_callback  = None
+        self.casing_callback = None
 
         self._build(start_pos)
 
@@ -108,6 +135,7 @@ class PuppetCharacter:
         self.torso_pivot = self.root_np.attachNewNode("torso_pivot")
         self.head_pivot = self.torso_pivot.attachNewNode("head_pivot")
         self.head_pivot.setPos(0, 0, TORSO_HEIGHT * 0.48 + HEAD_RADIUS * 0.85)
+        self.ik_helper_np = R.attachNewNode("ik_helper")
 
         # Back Holster Sockets (Spine Mounts)
         self.back_holster_sockets = {
@@ -188,21 +216,80 @@ class PuppetCharacter:
 
                 self.eyes.append({"socket": eye_socket, "eyelid": eyelid, "pupil": pupil, "side": side})
 
-            # Arms & Gloves
-            for side in ("left", "right"):
-                pivot = self.arm_pivots[side]
-                arm = L.loadModel("models/misc/sphere")
-                arm.setScale(ARM_RADIUS, ARM_RADIUS, ARM_LENGTH * 0.5)
-                arm.setColor(0.88, 0.56, 0.18, 1)
-                arm.setPos(0, 0, -(ARM_LENGTH * 0.35))
-                arm.reparentTo(pivot)
+            # ── SEAMLESS UNBREAKABLE 2-BONE LIMBS & ANATOMICAL TACTICAL GLOVES ──
+            self.upper_arms = {}
+            self.elbow_pivots = {}
+            self.elbow_caps = {}
+            self.forearms = {}
+            self.hand_nodes = {}
 
-                glove = L.loadModel("models/misc/sphere")
-                glove.setScale(HAND_RADIUS, HAND_RADIUS * 1.1, HAND_RADIUS)
-                glove.setColor(0.92, 0.20, 0.18, 1)
-                glove.setPos(0, 0.02, -(ARM_LENGTH * 0.75))
-                glove.reparentTo(pivot)
-                self.gloves.append(glove)
+            L1 = 0.20  # Upper arm length
+            L2 = 0.18  # Forearm length
+            self.arm_l1 = L1
+            self.arm_l2 = L2
+
+            for side in ("left", "right"):
+                shoulder_pivot = self.arm_pivots[side]
+
+                # 1. Deltoid Knuckle Cap (smooth overlapping ball joint at shoulder)
+                sh_cap = L.loadModel("models/misc/sphere")
+                sh_cap.setScale(ARM_RADIUS * 1.05)
+                sh_cap.setColor(0.88, 0.56, 0.18, 1)
+                sh_cap.reparentTo(shoulder_pivot)
+
+                # 2. Upper arm bicep sleeve extending along -Z from 0 to -L1
+                upper = L.loadModel("models/misc/sphere")
+                upper.setScale(ARM_RADIUS * 0.95, ARM_RADIUS * 0.95, L1 * 0.5)
+                upper.setColor(0.88, 0.56, 0.18, 1)
+                upper.setPos(0, 0, -(L1 * 0.5))
+                upper.reparentTo(shoulder_pivot)
+                self.upper_arms[side] = upper
+
+                # 3. Articulated Elbow Pivot (strictly parented at (0, 0, -L1))
+                elbow = shoulder_pivot.attachNewNode(f"{side}_elbow_pivot")
+                elbow.setPos(0, 0, -L1)
+                self.elbow_pivots[side] = elbow
+
+                # 4. Seamless Overlapping Elbow Knuckle Cap (fills joint at (0, 0, 0))
+                el_cap = L.loadModel("models/misc/sphere")
+                el_cap.setScale(ARM_RADIUS * 0.92)
+                el_cap.setColor(0.88, 0.56, 0.18, 1)
+                el_cap.reparentTo(elbow)
+                self.elbow_caps[side] = el_cap
+
+                # 5. Forearm sleeve extending along -Z from 0 to -L2
+                forearm = L.loadModel("models/misc/sphere")
+                forearm.setScale(ARM_RADIUS * 0.88, ARM_RADIUS * 0.88, L2 * 0.5)
+                forearm.setColor(0.88, 0.56, 0.18, 1)
+                forearm.setPos(0, 0, -(L2 * 0.5))
+                forearm.reparentTo(elbow)
+                self.forearms[side] = forearm
+
+                # 6. Hand Node strictly parented at (0, 0, -L2)
+                hand = elbow.attachNewNode(f"{side}_hand_node")
+                hand.setPos(0, 0, -L2)
+                self.hand_nodes[side] = hand
+
+                # 7. Anatomical Tactical Combat Hand
+                sign = 1.0 if side == "right" else -1.0
+                glove_root = hand.attachNewNode(f"{side}_glove_root")
+
+                # Wrist Gauntlet Cuff (dark neoprene sealing forearm to glove)
+                make_sharp_box(L, glove_root, (0.076, 0.076, 0.032), (0, 0, 0.015), color=(0.14, 0.14, 0.16, 1))
+
+                # Contoured Palm & Dorsal Plate (deep tactical red)
+                make_sharp_box(L, glove_root, (0.070, 0.065, 0.070), (0, 0.012, -0.028), color=(0.92, 0.20, 0.18, 1))
+
+                # Carbon Knuckle Armor Guard
+                make_sharp_box(L, glove_root, (0.068, 0.024, 0.022), (0, 0.042, -0.024), color=(0.16, 0.16, 0.18, 1))
+
+                # Ergonomic Angled Thumb
+                make_sharp_box(L, glove_root, (0.026, 0.034, 0.026), (sign * 0.038, 0.022, -0.026), hpr=(sign * 25, -15, 0), color=(0.82, 0.18, 0.16, 1))
+
+                # Gripping Fingers Pad
+                make_sharp_box(L, glove_root, (0.062, 0.034, 0.032), (0, 0.022, -0.068), hpr=(0, 22, 0), color=(0.82, 0.18, 0.16, 1))
+
+                self.gloves.append(glove_root)
 
             # Legs & Shoes
             for side in ("left", "right"):
@@ -222,6 +309,7 @@ class PuppetCharacter:
     def set_dust_callback(self, cb): self.dust_callback = cb
     def set_sfx_callback(self, cb): self.sfx_callback = cb
     def set_shoot_callback(self, cb): self.shoot_callback = cb
+    def set_casing_callback(self, cb): self.casing_callback = cb
 
     def set_skin(self, body_color, glove_color):
         if "torso" in self.skin_nodes:
@@ -310,7 +398,19 @@ class PuppetCharacter:
 
         gun.ammo_mag -= 1
         self.gun_fire_timer = gun.cfg["fire_rate"]
-        self.gun_recoil_pitch = 16.0 if gun.weapon_type != "shotgun" else 24.0
+
+        # 6-DOF Procedural Weapon Recoil (Linear Kickback + Muzzle Rise + Rifling Torque Twist)
+        w_type = gun.weapon_type
+        if w_type == "pistol":
+            self.weapon_dynamics.trigger_recoil(linear_kick=0.055, pitch_kick=8.0, yaw_kick=1.2, roll_kick=1.6)
+        elif w_type == "rifle":
+            self.weapon_dynamics.trigger_recoil(linear_kick=0.080, pitch_kick=11.5, yaw_kick=1.5, roll_kick=2.2)
+        elif w_type == "shotgun":
+            self.weapon_dynamics.trigger_recoil(linear_kick=0.140, pitch_kick=18.5, yaw_kick=2.6, roll_kick=4.0)
+
+        recoil_kick = 16.0 if gun.weapon_type != "shotgun" else 26.0
+        self.gun_recoil_spring.reset(self.gun_recoil_pitch + recoil_kick, -90.0)
+        self.gun_recoil_pitch = self.gun_recoil_spring.pos
 
         if self.sfx_callback:
             self.sfx_callback(gun.cfg["sound"])
@@ -318,6 +418,10 @@ class PuppetCharacter:
         torso_pos = self.root_np.getPos()
         fwd = self.get_forward_vector()
         muzzle_pos = torso_pos + fwd * 0.50 + Vec3(0, 0, 0.38)
+
+        # Eject 1 physical spent shell casing per trigger pull
+        if self.casing_callback:
+            self.casing_callback(muzzle_pos, fwd, gun.weapon_type == "shotgun")
 
         if self.shoot_callback:
             pellets = gun.cfg["pellets"]
@@ -459,6 +563,13 @@ class PuppetCharacter:
         if self.held_prop:
             self.throw_held_object()
 
+    def _orient_downward_joint(self, joint_np, target_world, origin_pos=None):
+        p = origin_pos if origin_pos is not None else joint_np.getPos(self.render)
+        self.ik_helper_np.setPos(p)
+        self.ik_helper_np.lookAt(self.render, target_world)
+        self.ik_helper_np.setP(self.ik_helper_np.getP() + 90.0)
+        joint_np.setHpr(self.render, self.ik_helper_np.getHpr(self.render))
+
     def get_forward_vector(self):
         rad = math.radians(self.facing)
         return Vec3(-math.sin(rad), math.cos(rad), 0)
@@ -482,8 +593,9 @@ class PuppetCharacter:
             self.throw_timer = max(0.0, self.throw_timer - dt)
         if self.gun_fire_timer > 0:
             self.gun_fire_timer = max(0.0, self.gun_fire_timer - dt)
-        if self.gun_recoil_pitch > 0:
-            self.gun_recoil_pitch = max(0.0, self.gun_recoil_pitch - dt * 90.0)
+
+        # Exact 2nd-order damped spring recoil decay
+        self.gun_recoil_pitch = self.gun_recoil_spring.update(0.0, dt)
 
         if self.is_reloading:
             self.reload_timer -= dt
@@ -503,15 +615,39 @@ class PuppetCharacter:
 
         body = self.physics_body
         cur_v = body.getLinearVelocity()
+        was_grounded = self.footing
 
-        cur_speed = cur_v.length()
-        if cur_speed > MAX_LINEAR_VELOCITY:
-            cur_v = cur_v * (MAX_LINEAR_VELOCITY / cur_speed)
-            body.setLinearVelocity(cur_v)
+        # Raycast Virtual Pneumatic Ground Suspension Probe
+        torso_pos = self.root_np.getPos()
+        p_from = Point3(torso_pos.x, torso_pos.y, torso_pos.z + 0.1)
+        p_to   = Point3(torso_pos.x, torso_pos.y, torso_pos.z - 1.3)
+        ray_res = self.world.rayTestClosest(p_from, p_to)
 
-        pos_z = self.root_np.getPos().z
-        self.footing = (pos_z <= 0.65 and abs(cur_v.z) < 1.5)
+        if ray_res.hasHit() and ray_res.getNode() != self.physics_body:
+            hit_p = ray_res.getHitPos()
+            hit_dist = p_from.z - hit_p.z - 0.1
+            self.ground_dist = hit_dist
+            self.ground_normal = ray_res.getHitNormal()
+            self.footing = (hit_dist <= SUSPENSION_REST_DIST + 0.18 and abs(cur_v.z) < 4.0)
 
+            if self.footing and not do_jump:
+                f_susp = calculate_ground_suspension_force(hit_dist, SUSPENSION_REST_DIST, cur_v.z, SUSPENSION_K, SUSPENSION_C)
+                f_susp = max(-60.0, min(180.0, f_susp))
+                body.applyCentralForce(Vec3(0, 0, f_susp))
+
+                # Dynamic slope slip force
+                slip_force, slope_deg = calculate_slope_slip_force(self.ground_normal, mass=6.0, gravity=GRAVITY, max_walkable_angle_deg=MAX_WALKABLE_SLOPE)
+                if slip_force.lengthSquared() > 0.05:
+                    body.applyCentralForce(slip_force)
+        else:
+            self.footing = False
+            self.ground_normal = Vec3(0, 0, 1)
+
+        # Procedural Landing Squash Impact (Overgrowth Dynamic Deformation)
+        if not was_grounded and self.footing:
+            self.squash_system.trigger_landing_squash(cur_v.z)
+
+        # Dynamic footing & balance meter update
         if self.footing:
             if self.balance < 100: self.balance += 20
             elif self.balance < 235: self.balance += 20
@@ -519,6 +655,13 @@ class PuppetCharacter:
         else:
             if self.balance > 100: self.balance -= 20
             elif self.balance > 0: self.balance -= 5
+
+        # Biomechanical acceleration & forward load tracking
+        cur_planar_vel = Vec3(cur_v.x, cur_v.y, 0)
+        accel_vec = (cur_planar_vel - self.prev_planar_vel) / max(0.001, dt)
+        fwd = self.get_forward_vector()
+        self.forward_accel = accel_vec.dot(fwd)
+        self.prev_planar_vel = cur_planar_vel
 
         delta_vz = cur_v.z - self.prev_vel_z
         self.prev_vel_z = cur_v.z
@@ -582,9 +725,15 @@ class PuppetCharacter:
 
         body.setLinearVelocity(Vec3(new_vx, new_vy, cur_v.z))
 
+        # Kinetic Energy & Velocity Safety Clamp
+        safe_v, safe_w = clamp_kinetic_energy(body.getLinearVelocity(), body.getAngularVelocity(), 6.0, MAX_KINETIC_ENERGY)
+        body.setLinearVelocity(safe_v)
+        body.setAngularVelocity(safe_w)
+
         if do_jump and self.jump_ready and self.footing:
             body.setLinearVelocity(Vec3(new_vx, new_vy, JUMP_VELOCITY))
             self.jump_ready = False
+            self.squash_system.trigger_jump_stretch(1.24)
             if self.sfx_callback:
                 self.sfx_callback("jump")
             if self.dust_callback:
@@ -597,12 +746,33 @@ class PuppetCharacter:
         torso_pos = self.root_np.getPos()
         fwd = self.get_forward_vector()
 
+        # Anatomical Lissajous Figure-8 Weapon Sway
+        sway_x, sway_z = calculate_lissajous_sway(self.anim_time, SWAY_FREQ, SWAY_AMP_X, SWAY_AMP_Z)
+        target_sway = Vec3(sway_x, 0, sway_z) if self.is_holding_gun() else Vec3(0, 0, 0)
+        curr_sway = self.gun_sway_spring.update(target_sway, dt)
+
+        # 6-DOF Procedural Weapon Dynamics (Linear Kickback + Angular Recoil + Sweep Inertia)
+        cam_dyaw = (cam_yaw - self.cam_prev_yaw) / max(0.001, dt)
+        self.cam_prev_yaw = cam_yaw
+        kick_z, wep_rot = self.weapon_dynamics.update(cam_dyaw, 0.0, dt)
+
+        rgt = Vec3(fwd.y, -fwd.x, 0)
+        up  = Vec3(0, 0, 1)
+
         for g_type, gun in self.weapons_inventory.items():
             slot_idx = gun.cfg["slot"]
             if g_type == self.active_gun_slot:
-                gun_pos = torso_pos + fwd * 0.42 + Vec3(0, 0, 0.38)
+                if g_type == "pistol":
+                    # Tactical Two-Handed Weaver Combat Stance (Pushed forward, centered)
+                    stance_offset = fwd * (0.24 + kick_z) + rgt * 0.08 + up * 0.30
+                else:
+                    # Rifle / Shotgun: Buttstock firmly seated in Right Shoulder Pocket!
+                    stance_offset = fwd * (0.12 + kick_z) + rgt * 0.14 + up * 0.28
+
+                gun_pos = torso_pos + stance_offset + curr_sway
                 gun.set_pos(gun_pos)
                 gun.look_at(target_3d_point)
+                gun.set_hpr(gun.np.getHpr() + wep_rot)
             else:
                 holster_socket = self.back_holster_sockets[slot_idx]
                 gun.set_pos(holster_socket.getPos(self.render))
@@ -610,12 +780,11 @@ class PuppetCharacter:
 
         if self.held_prop:
             lift_s = math.sin(self.lift_progress * math.pi * 0.5)
-            stride_bob  = math.sin(self.roll_amt * 2.0) * 0.02 * self.run_gas
-            stride_sway = math.cos(self.roll_amt) * 0.03 * self.run_gas
-            floor_z = 0.30
-            overhead_z = 0.74 + stride_bob
-            cur_z = floor_z * (1.0 - lift_s) + overhead_z * lift_s
-            fwd_offset = (0.50 * (1.0 - lift_s)) + (0.02 * lift_s)
+            stride_bob  = math.sin(self.roll_amt * 2.0) * 0.015 * self.run_gas
+            stride_sway = math.cos(self.roll_amt) * 0.02 * self.run_gas
+            # Realistic Chest-Braced Carry: rests securely against lower chest / upper abdomen
+            cur_z = 0.18 * (1.0 - lift_s) + (0.34 + stride_bob) * lift_s
+            fwd_offset = (0.46 * (1.0 - lift_s)) + (0.36 * lift_s)
             pos = torso_pos + fwd * fwd_offset + Vec3(stride_sway, 0, cur_z)
             self.held_prop.set_pos(pos)
 
@@ -650,176 +819,291 @@ class PuppetCharacter:
         self._update_layered_animation(dt, horiz_speed, is_sprinting, target_3d_point)
 
     def _update_layered_animation(self, dt, speed, is_sprinting, target_3d_point):
+        # ── PROCEDURAL ANKLE IK (Terrain Slope Alignment) ──
+        raw_fp, raw_fr = calculate_slope_foot_alignment(self.ground_normal, self.facing)
+        target_fp = raw_fp if self.footing else 0.0
+        target_fr = raw_fr if self.footing else 0.0
+        foot_p = self.foot_pitch_spring.update(target_fp, dt)
+        foot_r = self.foot_roll_spring.update(target_fr, dt)
+
+        # ── CYCLOIDAL GAIT KINEMATICS (Zero Ground Slip) ──
         if self.footing:
-            if speed > 0.3:
-                stride_mult = (1.5 if self.ice_mode else (3.2 if is_sprinting else 2.4))
-                self.roll_amt += speed * dt * stride_mult
-                if self.roll_amt > 2.0 * math.pi:
-                    self.roll_amt -= 2.0 * math.pi
+            if speed > 0.25:
+                stride_len = GAIT_STRIDE_BASE + (GAIT_STRIDE_SPRINT - GAIT_STRIDE_BASE) * min(1.0, speed / SPRINT_SPEED)
+                stride_mult = (1.2 if self.ice_mode else (1.6 if is_sprinting else 1.3))
+                self.gait_phase += (speed / max(0.1, stride_len)) * dt * (2.0 * math.pi) * stride_mult
+                if self.gait_phase > 2.0 * math.pi:
+                    self.gait_phase -= 2.0 * math.pi
                     if is_sprinting and self.dust_callback and not self.ice_mode:
                         t_pos = self.root_np.getPos()
                         self.dust_callback((t_pos.x, t_pos.y, 0.02))
 
-                roll = self.roll_amt
-                gas  = self.run_gas
-                l_leg_pitch = math.sin(roll) * (32.0 + gas * 18.0)
-                r_leg_pitch = -math.sin(roll) * (32.0 + gas * 18.0)
-                self.leg_pivots["left"].setHpr(0, l_leg_pitch, 0)
-                self.leg_pivots["right"].setHpr(0, r_leg_pitch, 0)
+                # Exact cycloidal displacement for left and right feet
+                l_x, l_z = cycloidal_step_displacement(self.gait_phase, stride_len, GAIT_STEP_HEIGHT)
+                r_x, r_z = cycloidal_step_displacement(self.gait_phase + math.pi, stride_len, GAIT_STEP_HEIGHT)
+
+                l_pitch = math.degrees(math.atan2(l_x, LEG_LENGTH * 1.1))
+                r_pitch = math.degrees(math.atan2(r_x, LEG_LENGTH * 1.1))
+                l_lift = (l_z / GAIT_STEP_HEIGHT) * 15.0
+                r_lift = (r_z / GAIT_STEP_HEIGHT) * 15.0
+
+                self.leg_pivots["left"].setHpr(0, l_pitch + l_lift + foot_p, foot_r)
+                self.leg_pivots["right"].setHpr(0, r_pitch + r_lift + foot_p, foot_r)
             else:
-                self.leg_pivots["left"].setHpr(0, 0, 0)
-                self.leg_pivots["right"].setHpr(0, 0, 0)
+                self.leg_pivots["left"].setHpr(0, foot_p, foot_r)
+                self.leg_pivots["right"].setHpr(0, foot_p, foot_r)
         else:
-            self.roll_amt -= dt * 10.0
-            kick = math.sin(self.roll_amt) * 25.0
+            self.gait_phase -= dt * 10.0
+            kick = math.sin(self.gait_phase) * 25.0
             self.leg_pivots["left"].setHpr(0, kick, -8.0)
             self.leg_pivots["right"].setHpr(0, -kick, 8.0)
 
-        if self.is_holding_gun():
-            torso_pos = self.root_np.getPos()
-            aim_vec = (target_3d_point - (torso_pos + Vec3(0, 0, 0.38))).normalized()
-            pitch_deg = math.degrees(math.asin(max(-0.95, min(0.95, aim_vec.z))))
-            arm_p = -pitch_deg - self.gun_recoil_pitch - 75.0
+        # ── INVERTED PENDULUM BIOMECHANICAL BANKING & ACCELERATION PITCH ──
+        bank_roll = calculate_centrifugal_bank_angle(speed, self.angular_vel_y, abs(GRAVITY), BANK_MAX_DEG)
+        accel_pitch = calculate_longitudinal_pitch_angle(self.forward_accel, abs(GRAVITY), PITCH_MAX_DEG)
 
-            self.arm_pivots["right"].setHpr(0, arm_p, 12.0)
-            self.arm_pivots["left"].setHpr(0, arm_p + 4.0, -16.0)
-
-        elif self.punch_timer > 0.0:
-            elapsed_ms = (PUNCH_DURATION - self.punch_timer) * 1000.0
-
-            if self.is_spin_punch:
-                self.arm_pivots["left"].setHpr(0, -60.0, -45.0)
-                self.arm_pivots["right"].setHpr(0, -60.0, 45.0)
-            else:
-                if elapsed_ms < 80.0:
-                    prog = elapsed_ms / 80.0
-                    punch_pitch = -20.0 + prog * 45.0
-                    punch_roll  = -prog * 25.0
-                    opp_pitch   = -prog * 35.0
-                elif elapsed_ms < 200.0:
-                    prog = (elapsed_ms - 80.0) / 120.0
-                    thrust_curve = math.sin(prog * math.pi * 0.5)
-                    punch_pitch = 25.0 - thrust_curve * 115.0
-                    punch_roll  = 20.0 * thrust_curve
-                    opp_pitch   = -35.0 + (1.0 - thrust_curve) * 15.0
-                else:
-                    prog = (elapsed_ms - 200.0) / 100.0
-                    punch_pitch = -90.0 + prog * 90.0
-                    punch_roll  = 20.0 * (1.0 - prog)
-                    opp_pitch   = -20.0 * (1.0 - prog)
-
-                if self.punch_right:
-                    self.arm_pivots["right"].setHpr(0, punch_pitch, punch_roll)
-                    self.arm_pivots["left"].setHpr(0, opp_pitch, -12.0)
-                else:
-                    self.arm_pivots["left"].setHpr(0, punch_pitch, -punch_roll)
-                    self.arm_pivots["right"].setHpr(0, opp_pitch, 12.0)
-
-        elif self.held_prop:
-            lift_s = math.sin(self.lift_progress * math.pi * 0.5)
-            reach_pitch = -25.0 * (1.0 - lift_s) + (-95.0 * lift_s)
-            clasp_roll  = 24.0 * lift_s
-            self.arm_pivots["left"].setHpr(0, reach_pitch, -clasp_roll)
-            self.arm_pivots["right"].setHpr(0, reach_pitch, clasp_roll)
-
-        elif self.throw_timer > 0.0:
-            throw_prog = 1.0 - (self.throw_timer / 0.22)
-            if throw_prog < 0.25:
-                snap_pitch = -95.0 - (throw_prog / 0.25) * 15.0
-            else:
-                snap_pitch = -110.0 + ((throw_prog - 0.25) / 0.75) * 160.0
-
-            self.arm_pivots["left"].setHpr(0, snap_pitch, -12.0)
-            self.arm_pivots["right"].setHpr(0, snap_pitch, 12.0)
-
-        elif self.footing:
-            if speed > 0.3:
-                roll = self.roll_amt
-                gas  = self.run_gas
-                l_arm_pitch = -math.sin(roll) * (40.0 + gas * 25.0)
-                r_arm_pitch =  math.sin(roll) * (40.0 + gas * 25.0)
-                self.arm_pivots["left"].setHpr(0, l_arm_pitch, -12.0)
-                self.arm_pivots["right"].setHpr(0, r_arm_pitch, 12.0)
-            else:
-                breath = math.sin(self.anim_time * 3.5)
-                self.arm_pivots["left"].setHpr(0, breath * 3.0, -12.0)
-                self.arm_pivots["right"].setHpr(0, -breath * 3.0, 12.0)
-        else:
-            wave1 = math.sin(self.anim_time * 14.0) * 25.0
-            self.arm_pivots["left"].setHpr(0, -65.0 + wave1, -25.0)
-            self.arm_pivots["right"].setHpr(0, -65.0 - wave1, 25.0)
+        # ── TORSO ORIENTATION & POSITION WITH EXACT 2ND-ORDER SPRING-DAMPER ──
+        target_torso_hpr = Vec3(0, 0, 0)
+        target_torso_pos = Vec3(0, 0, 0)
 
         if self.is_holding_gun():
             torso_pos = self.root_np.getPos()
             aim_vec = (target_3d_point - (torso_pos + Vec3(0, 0, 0.38))).normalized()
             pitch_deg = math.degrees(math.asin(max(-0.95, min(0.95, aim_vec.z))))
-            self.torso_pivot.setHpr(0, -pitch_deg * 0.35, 0)
+            active_gun = self.get_active_gun()
+            torso_blade_yaw = -16.0 if active_gun and active_gun.weapon_type != "pistol" else -8.0
+            target_torso_hpr = Vec3(torso_blade_yaw, -pitch_deg * 0.35 + accel_pitch * 0.5, bank_roll)
         elif self.punch_timer > 0.0:
             if self.is_spin_punch:
                 progress = 1.0 - (self.punch_timer / PUNCH_DURATION)
                 spin_h = progress * 360.0
-                self.torso_pivot.setHpr(spin_h, 8.0, 0)
+                target_torso_hpr = Vec3(spin_h, 8.0, 0)
             else:
                 elapsed_ms = (PUNCH_DURATION - self.punch_timer) * 1000.0
                 mirror = 1.0 if self.punch_right else -1.0
-                if elapsed_ms < 80.0:
-                    coil = (elapsed_ms / 80.0) * -15.0 * mirror
-                elif elapsed_ms < 200.0:
-                    prog = (elapsed_ms - 80.0) / 120.0
-                    coil = (-15.0 + math.sin(prog * math.pi * 0.5) * 39.0) * mirror
+                if elapsed_ms < 65.0:
+                    prog = elapsed_ms / 65.0
+                    torso_twist = -16.0 * prog * mirror
+                    target_torso_pos = Vec3(0, 0, 0)
+                elif elapsed_ms < 145.0:
+                    prog = (elapsed_ms - 65.0) / 80.0
+                    thrust = math.sin(prog * math.pi * 0.5)
+                    torso_twist = (-16.0 + thrust * 42.0) * mirror
+                    target_torso_pos = Vec3(0, 0.10 * thrust, 0)
                 else:
-                    prog = (elapsed_ms - 200.0) / 100.0
-                    coil = (24.0 * (1.0 - prog)) * mirror
-                self.torso_pivot.setHpr(coil, 6.0, 0)
-
+                    prog = (elapsed_ms - 145.0) / 135.0
+                    ret_s = 1.0 - prog
+                    torso_twist = 26.0 * ret_s * mirror
+                    target_torso_pos = Vec3(0, 0.10 * ret_s, 0)
+                target_torso_hpr = Vec3(torso_twist, 4.0, 0)
         elif self.throw_timer > 0.0:
             throw_prog = 1.0 - (self.throw_timer / 0.22)
-            snap_lean = math.sin(throw_prog * math.pi) * 18.0
-            self.torso_pivot.setHpr(0, snap_lean, 0)
+            snap_lean = math.sin(throw_prog * math.pi) * 22.0
+            target_torso_hpr = Vec3(0, snap_lean, 0)
         elif self.held_prop:
             lift_s = math.sin(self.lift_progress * math.pi * 0.5)
-            torso_lean = -6.0 * lift_s
-            self.torso_pivot.setHpr(0, torso_lean, 0)
-            self.torso_pivot.setPos(0, 0, 0)
+            torso_squat = -0.10 * math.sin(self.lift_progress * math.pi)
+            torso_lean = 14.0 * (1.0 - lift_s) - 8.0 * lift_s
+            target_torso_hpr = Vec3(0, torso_lean + accel_pitch * 0.5, bank_roll)
+            target_torso_pos = Vec3(0, 0, torso_squat)
         elif self.footing:
             if speed > 0.3:
-                roll = self.roll_amt
                 gas  = self.run_gas
-                torso_bob   = abs(math.sin(roll)) * (0.05 if is_sprinting else 0.04) * gas
-                torso_pitch = gas * (16.0 if is_sprinting else 10.0)
-                torso_roll  = -self.turn_diff * (0.45 if self.ice_mode else 0.25) * gas
-                self.torso_pivot.setPos(0, 0, torso_bob)
-                self.torso_pivot.setHpr(0, torso_pitch, torso_roll)
+                stride_phase = self.gait_phase
+                torso_bob   = abs(math.sin(stride_phase)) * (0.05 if is_sprinting else 0.04) * gas
+                torso_pitch = gas * (14.0 if is_sprinting else 9.0) + accel_pitch
+                torso_roll  = bank_roll - self.turn_diff * (0.35 if self.ice_mode else 0.20) * gas
+                target_torso_pos = Vec3(0, 0, torso_bob)
+                target_torso_hpr = Vec3(0, torso_pitch, torso_roll)
             else:
                 breath = math.sin(self.anim_time * 3.5)
                 sway   = math.cos(self.anim_time * 1.8)
-                self.torso_pivot.setPos(0, 0, breath * 0.008)
-                self.torso_pivot.setHpr(sway * 1.2, breath * 1.5, 0)
+                target_torso_pos = Vec3(0, 0, breath * 0.008)
+                target_torso_hpr = Vec3(sway * 1.2, breath * 1.5, 0)
         else:
-            self.torso_pivot.setPos(0, 0, 0)
-            self.torso_pivot.setHpr(0, -8.0, 0)
+            target_torso_hpr = Vec3(0, -8.0, 0)
 
+        # ── PROCEDURAL SQUASH & STRETCH (David Rosen Overgrowth Formulation) ──
+        cur_vz = self.physics_body.getLinearVelocity().z
+        squash_scale = self.squash_system.update(cur_vz, self.footing, dt)
+        self.torso_pivot.setScale(squash_scale)
+
+        # ── PROCEDURAL SPINE CURVATURE FLEXION ──
+        spine_flex = self.spine_flex_spring.update(self.turn_diff * 0.22, dt)
+        target_torso_hpr = Vec3(target_torso_hpr.x + spine_flex, target_torso_hpr.y, target_torso_hpr.z)
+
+        smoothed_torso_hpr = self.torso_hpr_spring.update(target_torso_hpr, dt)
+        smoothed_torso_pos = self.torso_pos_spring.update(target_torso_pos, dt)
+        self.torso_pivot.setHpr(smoothed_torso_hpr)
+        self.torso_pivot.setPos(smoothed_torso_pos)
+
+        # ── HEAD TRACKING WITH EXACT 2ND-ORDER SPRING-DAMPER ──
+        target_head_hpr = Vec3(0, 0, 0)
         if self.is_holding_gun():
             torso_pos = self.root_np.getPos()
             aim_vec = (target_3d_point - (torso_pos + Vec3(0, 0, 0.38))).normalized()
             pitch_deg = math.degrees(math.asin(max(-0.95, min(0.95, aim_vec.z))))
-            self.head_pivot.setHpr(0, -pitch_deg * 0.5, 0)
+            active_gun = self.get_active_gun()
+            torso_blade_yaw = -16.0 if active_gun and active_gun.weapon_type != "pistol" else -8.0
+            target_head_hpr = Vec3(-torso_blade_yaw, -pitch_deg * 0.5, 0)
         elif self.held_prop:
             lift_s = math.sin(self.lift_progress * math.pi * 0.5)
             head_look_up = 26.0 * lift_s
-            self.head_pivot.setHpr(0, head_look_up + self.head_jolt_pitch, 0)
+            target_head_hpr = Vec3(0, head_look_up + self.head_jolt_pitch, 0)
         elif self.footing:
             if speed > 0.3:
                 gas  = self.run_gas
-                torso_pitch = gas * (16.0 if is_sprinting else 10.0)
+                torso_pitch = gas * (14.0 if is_sprinting else 9.0) + accel_pitch
                 head_pitch  = -torso_pitch * 0.6 + self.head_jolt_pitch
-                self.head_pivot.setHpr(0, head_pitch, 0)
+                target_head_hpr = Vec3(0, head_pitch, 0)
             else:
                 breath = math.sin(self.anim_time * 3.5)
                 sway   = math.cos(self.anim_time * 1.8)
-                self.head_pivot.setHpr(sway * 2.0, -breath * 2.0 + self.head_jolt_pitch, 0)
+                target_head_hpr = Vec3(sway * 2.0, -breath * 2.0 + self.head_jolt_pitch, 0)
         else:
-            self.head_pivot.setHpr(0, 15.0 + self.head_jolt_pitch, 0)
+            target_head_hpr = Vec3(0, 15.0 + self.head_jolt_pitch, 0)
+
+        smoothed_head_hpr = self.head_hpr_spring.update(target_head_hpr, dt)
+        self.head_pivot.setHpr(smoothed_head_hpr)
+
+        # ── CLOSED-FORM 3D TWO-BONE INVERSE KINEMATICS & ARM LAYERED ACTIONS ──
+        if self.is_holding_gun():
+            active_gun = self.get_active_gun()
+            if active_gun and hasattr(active_gun, "grip_socket") and hasattr(active_gun, "guard_socket"):
+                L1 = self.arm_l1
+                L2 = self.arm_l2
+                fwd = self.get_forward_vector()
+                rgt = Vec3(fwd.y, -fwd.x, 0)
+                up  = Vec3(0, 0, 1)
+
+                # Right Arm: Firing hand locks to weapon grip socket
+                r_sh_pos = self.arm_pivots["right"].getPos(self.render)
+                r_target = active_gun.grip_socket.getPos(self.render)
+                r_pole   = rgt * 0.85 - up * 0.50 - fwd * 0.15  # Outward flared combat elbow
+                r_elbow  = solve_two_bone_ik_3d(r_sh_pos, r_target, L1, L2, r_pole)
+                self._orient_downward_joint(self.arm_pivots["right"], r_elbow, r_sh_pos)
+                self._orient_downward_joint(self.elbow_pivots["right"], r_target, r_elbow)
+
+                # Left Arm: Support hand locks to handguard / forend socket
+                l_sh_pos = self.arm_pivots["left"].getPos(self.render)
+                l_target = active_gun.guard_socket.getPos(self.render)
+                l_pole   = -rgt * 0.35 + fwd * 0.40 - up * 0.85  # Tucked tactical support elbow
+                l_elbow  = solve_two_bone_ik_3d(l_sh_pos, l_target, L1, L2, l_pole)
+                self._orient_downward_joint(self.arm_pivots["left"], l_elbow, l_sh_pos)
+                self._orient_downward_joint(self.elbow_pivots["left"], l_target, l_elbow)
+
+        elif self.held_prop:
+            # ── TWO-HANDED PHYSICAL CRATE HOLDING IK ──
+            p_crate = self.held_prop.get_pos()
+            fwd = self.get_forward_vector()
+            rgt = Vec3(fwd.y, -fwd.x, 0)
+            up  = Vec3(0, 0, 1)
+
+            crate_left  = p_crate - rgt * 0.20 + up * 0.02
+            crate_right = p_crate + rgt * 0.20 + up * 0.02
+
+            L1 = self.arm_l1
+            L2 = self.arm_l2
+
+            l_sh_pos = self.arm_pivots["left"].getPos(self.render)
+            l_pole = -rgt * 0.85 - up * 0.40
+            l_elbow = solve_two_bone_ik_3d(l_sh_pos, crate_left, L1, L2, l_pole)
+            self._orient_downward_joint(self.arm_pivots["left"], l_elbow, l_sh_pos)
+            self._orient_downward_joint(self.elbow_pivots["left"], crate_left, l_elbow)
+
+            r_sh_pos = self.arm_pivots["right"].getPos(self.render)
+            r_pole = rgt * 0.85 - up * 0.40
+            r_elbow = solve_two_bone_ik_3d(r_sh_pos, crate_right, L1, L2, r_pole)
+            self._orient_downward_joint(self.arm_pivots["right"], r_elbow, r_sh_pos)
+            self._orient_downward_joint(self.elbow_pivots["right"], crate_right, r_elbow)
+
+        elif self.punch_timer > 0.0:
+            # ── 3-PHASE MARTIAL ARTS COMBO CROSS / JAB ──
+            elapsed_ms = (PUNCH_DURATION - self.punch_timer) * 1000.0
+            mirror = 1.0 if self.punch_right else -1.0
+
+            if self.is_spin_punch:
+                self.arm_pivots["left"].setHpr(0, -60.0, -45.0)
+                self.elbow_pivots["left"].setHpr(0, -20.0, 0)
+                self.arm_pivots["right"].setHpr(0, -60.0, 45.0)
+                self.elbow_pivots["right"].setHpr(0, -20.0, 0)
+            else:
+                if elapsed_ms < 65.0:
+                    prog = elapsed_ms / 65.0
+                    punch_pitch = -25.0 * prog
+                    punch_roll  = 12.0 * prog * mirror
+                    elbow_bend  = -75.0 * prog
+                    opp_pitch   = -35.0 * prog
+                    opp_roll    = -15.0 * prog * mirror
+                    opp_elbow   = -65.0 * prog
+                elif elapsed_ms < 145.0:
+                    prog = (elapsed_ms - 65.0) / 80.0
+                    thrust = math.sin(prog * math.pi * 0.5)
+                    punch_pitch = -25.0 - thrust * 62.0
+                    punch_roll  = (12.0 + thrust * 18.0) * mirror
+                    elbow_bend  = -75.0 * (1.0 - thrust)
+                    opp_pitch   = -35.0
+                    opp_roll    = -15.0 * mirror
+                    opp_elbow   = -65.0
+                else:
+                    prog = (elapsed_ms - 145.0) / 135.0
+                    ret_s = 1.0 - prog
+                    punch_pitch = -87.0 * ret_s
+                    punch_roll  = 30.0 * ret_s * mirror
+                    elbow_bend  = -20.0 * (1.0 - ret_s)
+                    opp_pitch   = -35.0 * ret_s
+                    opp_roll    = -15.0 * ret_s * mirror
+                    opp_elbow   = -65.0 * ret_s - 15.0 * (1.0 - ret_s)
+
+                if self.punch_right:
+                    self.arm_pivots["right"].setHpr(0, punch_pitch, punch_roll)
+                    self.elbow_pivots["right"].setHpr(0, elbow_bend, 0)
+                    self.arm_pivots["left"].setHpr(0, opp_pitch, opp_roll)
+                    self.elbow_pivots["left"].setHpr(0, opp_elbow, 0)
+                else:
+                    self.arm_pivots["left"].setHpr(0, punch_pitch, punch_roll)
+                    self.elbow_pivots["left"].setHpr(0, elbow_bend, 0)
+                    self.arm_pivots["right"].setHpr(0, opp_pitch, opp_roll)
+                    self.elbow_pivots["right"].setHpr(0, opp_elbow, 0)
+
+        elif self.throw_timer > 0.0:
+            # ── 2-PHASE PHYSICAL HEAVE THROW ──
+            throw_prog = 1.0 - (self.throw_timer / 0.22)
+            if throw_prog < 0.25:
+                snap_pitch = -20.0 - (throw_prog / 0.25) * 15.0
+                el_pitch = -70.0
+            else:
+                thrust = math.sin(((throw_prog - 0.25) / 0.75) * math.pi * 0.5)
+                snap_pitch = -35.0 - thrust * 55.0
+                el_pitch = -70.0 * (1.0 - thrust)
+
+            self.arm_pivots["left"].setHpr(0, snap_pitch, -12.0)
+            self.elbow_pivots["left"].setHpr(0, el_pitch, 0)
+            self.arm_pivots["right"].setHpr(0, snap_pitch, 12.0)
+            self.elbow_pivots["right"].setHpr(0, el_pitch, 0)
+
+        elif self.footing:
+            if speed > 0.3:
+                stride_phase = self.gait_phase
+                gas  = self.run_gas
+                l_arm_pitch = -math.sin(stride_phase) * (36.0 + gas * 22.0)
+                r_arm_pitch =  math.sin(stride_phase) * (36.0 + gas * 22.0)
+                self.arm_pivots["left"].setHpr(0, l_arm_pitch, -10.0)
+                self.elbow_pivots["left"].setHpr(0, min(0.0, -l_arm_pitch * 0.35 - 14.0), 0)
+                self.arm_pivots["right"].setHpr(0, r_arm_pitch, 10.0)
+                self.elbow_pivots["right"].setHpr(0, min(0.0, -r_arm_pitch * 0.35 - 14.0), 0)
+            else:
+                breath = math.sin(self.anim_time * 3.5)
+                self.arm_pivots["left"].setHpr(0, breath * 2.5, -10.0)
+                self.elbow_pivots["left"].setHpr(0, -14.0, 0)
+                self.arm_pivots["right"].setHpr(0, -breath * 2.5, 10.0)
+                self.elbow_pivots["right"].setHpr(0, -14.0, 0)
+        else:
+            wave1 = math.sin(self.anim_time * 14.0) * 25.0
+            self.arm_pivots["left"].setHpr(0, -65.0 + wave1, -25.0)
+            self.elbow_pivots["left"].setHpr(0, -35.0, 0)
+            self.arm_pivots["right"].setHpr(0, -65.0 - wave1, 25.0)
+            self.elbow_pivots["right"].setHpr(0, -35.0, 0)
 
     def get_torso_pos(self):
         return self.root_np.getPos()

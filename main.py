@@ -14,9 +14,9 @@
 #   H                  : Toggle Ice Mode
 #   TAB                : Toggle Mouse Cursor Lock
 #   ESC                : Quit
-import sys, math, pathlib
+import sys, math, random, pathlib
 from direct.showbase.ShowBase import ShowBase
-from panda3d.core import (Vec3, Vec4, Point3, DirectionalLight, AmbientLight,
+from panda3d.core import (Vec3, Vec4, Point3, Filename, DirectionalLight, AmbientLight,
                            CardMaker, LineSegs, AntialiasAttrib,
                            loadPrcFileData, TextNode, KeyboardButton,
                            WindowProperties, MouseButton)
@@ -24,8 +24,9 @@ from panda3d.bullet import BulletWorld, BulletPlaneShape, BulletRigidBodyNode
 from direct.gui.OnscreenText import OnscreenText
 
 from physics_constants import *
+from physics_math import SpringDamper1D, SpringDamper3D, CameraTraumaSystem, calculate_off_center_torque, HitStopManager
 from character import PuppetCharacter, box_normalize_to_circle
-from props import InteractiveCrate, BowlingPin, GunWeapon
+from props import InteractiveCrate, BowlingPin, GunWeapon, SpentCasing
 
 loadPrcFileData("", "window-title PuppetEngine - Pure Python TPS & Physics Sandbox")
 loadPrcFileData("", "win-size 1280 720")
@@ -106,15 +107,19 @@ class PuppetEngine(ShowBase):
         sfx_dir = pathlib.Path(__file__).parent / "sfx"
         for sfx_name in ("punch_whoosh", "punch_hit", "jump", "throw", "stun",
                          "pistol_shot", "rifle_shot", "shotgun_shot", "reload", "gun_pickup"):
-            p = sfx_dir / f"{sfx_name}.wav"
+            p = (sfx_dir / f"{sfx_name}.wav").resolve()
             if p.exists():
-                self.sounds[sfx_name] = self.loader.loadSfx(str(p))
+                fn = Filename.fromOsSpecific(str(p))
+                snd = self.loader.loadSfx(fn)
+                if snd:
+                    self.sounds[sfx_name] = snd
 
         # ── Puppet Character ──
         self.puppet = PuppetCharacter(self.bullet, self.render, self.loader, (0, 0, 0))
         self.puppet.set_dust_callback(self.spawn_dust)
         self.puppet.set_sfx_callback(self.play_sfx)
         self.puppet.set_shoot_callback(self._execute_bullet_fire)
+        self.puppet.set_casing_callback(self._eject_casing)
 
         self.props = []
         self._spawn_props()
@@ -122,6 +127,7 @@ class PuppetEngine(ShowBase):
         self.dust_puffs = []
         self.tracers    = []
         self.flashes    = []
+        self.casings    = []
 
         cm = CardMaker("shadow")
         cm.setFrame(-0.35, 0.35, -0.35, 0.35)
@@ -142,6 +148,12 @@ class PuppetEngine(ShowBase):
         self.mouse_locked     = True
         self.current_3d_target = Point3(0, 10, 1)
 
+        # Exact 2nd-order camera spring-damper stabilizers & Non-linear Trauma Shake
+        self.cam_pos_spring  = SpringDamper3D((0.0, 0.0, 0.0), omega=SPRING_OMEGA_CAM, zeta=SPRING_ZETA_CAM)
+        self.cam_fov_spring  = SpringDamper1D(CAM_FOV_BASE, omega=12.0, zeta=1.0)
+        self.trauma_system   = CameraTraumaSystem(decay_rate=1.8, max_yaw=2.2, max_pitch=2.8, max_roll=1.6)
+        self.hit_stop        = HitStopManager()
+
         self.cam_pivot = self.render.attachNewNode("cam_pivot")
         self.cam_pitch_pivot = self.cam_pivot.attachNewNode("cam_pitch_pivot")
         self.camera.reparentTo(self.cam_pitch_pivot)
@@ -161,7 +173,7 @@ class PuppetEngine(ShowBase):
             shadow=(0, 0, 0, 0.8), align=TextNode.ACenter, mayChange=True)
 
         self.hud_ammo = OnscreenText(
-            text="👊 UNARMED", pos=(0.90, -0.86), scale=0.048, fg=(1, 1, 1, 0.95),
+            text="[UNARMED] (PUNCH)", pos=(0.90, -0.86), scale=0.048, fg=(1, 1, 1, 0.95),
             shadow=(0, 0, 0, 0.8), align=TextNode.ARight, mayChange=True)
 
         self.hud_slots = OnscreenText(
@@ -184,7 +196,9 @@ class PuppetEngine(ShowBase):
 
     def play_sfx(self, name):
         if name in self.sounds:
-            self.sounds[name].play()
+            snd = self.sounds[name]
+            snd.setPlayRate(random.uniform(0.96, 1.04))
+            snd.play()
 
     def spawn_dust(self, pos):
         puff = DustPuff(self.render, self.loader, pos)
@@ -194,26 +208,62 @@ class PuppetEngine(ShowBase):
         self.cam_zoom_index = (self.cam_zoom_index + 1) % len(self.cam_zoom_presets)
         self.cam_target_dist = self.cam_zoom_presets[self.cam_zoom_index]
 
+    def _eject_casing(self, muzzle_pos, fwd, is_shotgun):
+        rgt = Vec3(fwd.y, -fwd.x, 0)
+        up  = Vec3(0, 0, 1)
+        casing = SpentCasing(self.bullet, self.render, self.loader, muzzle_pos, fwd, rgt, up, is_shotgun)
+        self.casings.append(casing)
+
     def _execute_bullet_fire(self, muzzle_pos, target_3d_point, bullet_force):
         p_from = Point3(muzzle_pos.x, muzzle_pos.y, muzzle_pos.z)
-        bullet_dir = (target_3d_point - p_from).normalized()
-        p_to   = Point3(p_from + bullet_dir * 90.0)
+        bullet_diff = target_3d_point - p_from
+        if bullet_diff.lengthSquared() < 0.001:
+            bullet_dir = Vec3(0, 1, 0)
+        else:
+            bullet_dir = bullet_diff.normalized()
+        p_to = Point3(p_from + bullet_dir * 90.0)
 
         self.flashes.append(MuzzleFlash(self.render, self.loader, p_from))
 
+        active_gun = self.puppet.get_active_gun()
+        if active_gun:
+            t_amt = 0.10 if active_gun.weapon_type == "pistol" else (0.14 if active_gun.weapon_type == "rifle" else 0.35)
+            self.trauma_system.add_trauma(t_amt)
+
         result = self.bullet.rayTestClosest(p_from, p_to)
         if result.hasHit():
-            hit_pos  = result.getHitPos()
             hit_node = result.getNode()
+            if hit_node == self.puppet.physics_body:
+                # Ignore self collision from muzzle offset
+                self.tracers.append(BulletTracer(self.render, p_from, p_to))
+                return
 
+            hit_pos = result.getHitPos()
             self.tracers.append(BulletTracer(self.render, p_from, hit_pos))
             self.spawn_dust(hit_pos)
 
-            if isinstance(hit_node, BulletRigidBodyNode) and hit_node.getMass() > 0:
+            hit_prop_matched = False
+            for prop in self.props:
+                if getattr(prop, "node", None) == hit_node:
+                    impulse = bullet_dir * bullet_force + Vec3(0, 0, 4.5)
+                    prop.apply_impulse(impulse, hit_pos)
+                    self.play_sfx("punch_hit")
+                    self.hit_stop.trigger(0.038)
+                    hit_prop_matched = True
+                    break
+
+            if not hit_prop_matched and isinstance(hit_node, BulletRigidBodyNode) and hit_node.getMass() > 0:
                 impulse = bullet_dir * bullet_force + Vec3(0, 0, 4.5)
                 hit_node.setActive(True)
                 hit_node.applyCentralImpulse(impulse)
+                body_pos = hit_node.getTransform().getPos()
+                torque = calculate_off_center_torque(hit_pos, body_pos, impulse, max_lever_arm=0.25)
+                hit_node.applyTorqueImpulse(torque)
+                ang_v = hit_node.getAngularVelocity()
+                if ang_v.lengthSquared() > MAX_ANGULAR_VELOCITY * MAX_ANGULAR_VELOCITY:
+                    hit_node.setAngularVelocity(ang_v.normalized() * MAX_ANGULAR_VELOCITY)
                 self.play_sfx("punch_hit")
+                self.hit_stop.trigger(0.038)
         else:
             self.tracers.append(BulletTracer(self.render, p_from, p_to))
 
@@ -305,6 +355,13 @@ class PuppetEngine(ShowBase):
         self.accept("escape", sys.exit)
 
     def _do_primary_click(self):
+        if not self.puppet.is_holding_gun():
+            t_pos = self.puppet.get_torso_pos()
+            for p in self.props:
+                if not getattr(p, "is_held", False) and (p.get_pos() - t_pos).length() < 1.35:
+                    self.hit_stop.trigger(0.048)
+                    self.trauma_system.add_trauma(0.24)
+                    break
         self.puppet.trigger_primary_action(self.props, self.current_3d_target)
 
     def _do_pickup(self):
@@ -319,7 +376,8 @@ class PuppetEngine(ShowBase):
             self.gv.setColor(0.20, 0.46, 0.22, 1)
 
     def _update(self, task):
-        dt = min(globalClock.getDt(), 0.05)
+        raw_dt = min(globalClock.getDt(), 0.05)
+        dt = self.hit_stop.process_dt(raw_dt)
 
         # ── UNRESTRICTED FULL 360° MOUSE LOOK ──
         if self.mouse_locked and self.mouseWatcherNode.hasMouse():
@@ -341,12 +399,39 @@ class PuppetEngine(ShowBase):
         target_shoulder = 0.55 if self.puppet.is_holding_gun() else 0.0
         self.shoulder_x += (target_shoulder - self.shoulder_x) * min(1.0, dt * 10.0)
 
+        # ── EXACT 2ND-ORDER CRITICALLY DAMPED CAMERA PIVOT TRACKING ──
         torso_pos = self.puppet.get_torso_pos()
         target_pos = torso_pos + Vec3(0, 0, 0.45)
-        self.cam_pivot.setPos(target_pos)
-        self.cam_pivot.setH(self.cam_yaw)
-        self.cam_pitch_pivot.setP(self.cam_pitch)
-        self.camera.setPos(self.shoulder_x, -self.cam_dist, 0.20)
+        smoothed_pos = self.cam_pos_spring.update(target_pos, dt)
+        self.cam_pivot.setPos(smoothed_pos)
+
+        # Kinetic Trauma Screen Shake
+        shake = self.trauma_system.update(dt)
+        self.cam_pivot.setH(self.cam_yaw + shake.x)
+        self.cam_pitch_pivot.setP(self.cam_pitch + shake.y)
+        self.cam_pitch_pivot.setR(shake.z)
+
+        # ── CAMERA OBSTACLE RAYCAST ANTI-CLIPPING ──
+        ideal_cam_world = self.render.getRelativePoint(self.cam_pitch_pivot, Point3(self.shoulder_x, -self.cam_dist, 0.20))
+        p_from = Point3(target_pos)
+        p_to   = Point3(ideal_cam_world)
+        cam_occ_ray = self.bullet.rayTestClosest(p_from, p_to)
+        if cam_occ_ray.hasHit() and cam_occ_ray.getNode() != self.puppet.physics_body:
+            occ_dist = (cam_occ_ray.getHitPos() - p_from).length()
+            actual_dist = max(1.0, min(self.cam_dist, occ_dist - CAM_COLLISION_MARGIN))
+        else:
+            actual_dist = self.cam_dist
+
+        self.camera.setPos(self.shoulder_x, -actual_dist, 0.20)
+
+        # ── VELOCITY-COUPLED DYNAMIC FOV WARP ──
+        char_v = self.puppet.physics_body.getLinearVelocity()
+        cur_planar_speed = math.hypot(char_v.x, char_v.y)
+        sprint_ratio = max(0.0, min(1.0, (cur_planar_speed - MOVE_SPEED) / max(0.1, SPRINT_SPEED - MOVE_SPEED)))
+        target_fov = CAM_FOV_BASE + (CAM_FOV_SPRINT - CAM_FOV_BASE) * (sprint_ratio ** 1.8)
+        cur_fov = self.cam_fov_spring.update(target_fov, dt)
+        if getattr(self, "camLens", None):
+            self.camLens.setFov(cur_fov)
 
         # ── TWO-RAY PINPOINT CROSSHAIR RAYCAST ──
         cam_world_pos  = self.camera.getPos(self.render)
@@ -357,7 +442,7 @@ class PuppetEngine(ShowBase):
         p_to   = Point3(cam_world_pos + cam_fwd * 100.0)
 
         cam_ray = self.bullet.rayTestClosest(p_from, p_to)
-        if cam_ray.hasHit():
+        if cam_ray.hasHit() and cam_ray.getNode() != self.puppet.physics_body:
             self.current_3d_target = cam_ray.getHitPos()
         else:
             self.current_3d_target = p_to
@@ -418,15 +503,15 @@ class PuppetEngine(ShowBase):
             self.crosshair.show()
             gun = self.puppet.get_active_gun()
             if self.puppet.is_reloading:
-                self.hud_ammo.setText(f"🔫 {gun.name.upper()} | ⏳ RELOADING...")
+                self.hud_ammo.setText(f"[{gun.name.upper()}]  |  [RELOADING...]")
             else:
-                self.hud_ammo.setText(f"🔫 {gun.name.upper()} | {gun.ammo_mag} / {gun.ammo_reserve}")
+                self.hud_ammo.setText(f"[{gun.name.upper()}]  |  AMMO: {gun.ammo_mag} / {gun.ammo_reserve}")
         elif self.puppet.held_prop:
             self.crosshair.hide()
-            self.hud_ammo.setText(f"📦 HOLDING {self.puppet.held_prop.name.upper()}")
+            self.hud_ammo.setText(f"[HOLDING {self.puppet.held_prop.name.upper()}]")
         else:
             self.crosshair.hide()
-            self.hud_ammo.setText("👊 UNARMED (PUNCH)")
+            self.hud_ammo.setText("[UNARMED] (PUNCH / THROW)")
 
         # Update VFX
         active_dust = [p for p in self.dust_puffs if p.update(dt)]
@@ -437,6 +522,14 @@ class PuppetEngine(ShowBase):
 
         active_flashes = [f for f in self.flashes if f.update(dt)]
         self.flashes = active_flashes
+
+        # Update Physical Spent Shell Casings
+        self.casings = [c for c in self.casings if c.update(dt)]
+
+        # Update Prop Aerodynamics (Quadratic Drag & Rotational Resistance)
+        for prop in self.props:
+            if hasattr(prop, "update_physics"):
+                prop.update_physics(dt)
 
         # Step Bullet physics
         self.bullet.doPhysics(dt, 10, 1.0 / 180.0)
