@@ -137,20 +137,23 @@ class PuppetCharacter:
         self.head_pivot.setPos(0, 0, TORSO_HEIGHT * 0.48 + HEAD_RADIUS * 0.85)
         self.ik_helper_np = R.attachNewNode("ik_helper")
 
-        # Back Holster Sockets (Spine Mounts)
+        # Tactical Holster Sockets (Spine Mounts & Duty Hip Holster)
         self.back_holster_sockets = {
             1: self.torso_pivot.attachNewNode("holster_slot1"),
             2: self.torso_pivot.attachNewNode("holster_slot2"),
             3: self.torso_pivot.attachNewNode("holster_slot3"),
         }
-        self.back_holster_sockets[1].setPos(-0.16, -0.08, -0.05)
-        self.back_holster_sockets[1].setHpr(0, 75, 10)
+        # Slot 1: Tactical Right Hip Holster (Muzzle down along thigh, grip back for quick draw)
+        self.back_holster_sockets[1].setPos(0.19, -0.02, -0.07)
+        self.back_holster_sockets[1].setHpr(0, -90, 0)
 
-        self.back_holster_sockets[2].setPos(0.08, -0.16, 0.08)
-        self.back_holster_sockets[2].setHpr(25, 40, -35)
+        # Slot 2: Tactical Rifle Spine Scabbard (Flat on side across back, barrel up diagonally)
+        self.back_holster_sockets[2].setPos(0.06, -0.19, 0.04)
+        self.back_holster_sockets[2].setHpr(90.0, 75.5, 0.0)
 
-        self.back_holster_sockets[3].setPos(-0.08, -0.16, 0.08)
-        self.back_holster_sockets[3].setHpr(-25, 40, 35)
+        # Slot 3: Tactical Shotgun Spine Scabbard (Flat on side across back, opposite diagonal)
+        self.back_holster_sockets[3].setPos(-0.06, -0.21, 0.04)
+        self.back_holster_sockets[3].setHpr(-90.0, 75.5, 0.0)
 
         self.arm_pivots = {}
         for side, sx in [("left", -(TORSO_RADIUS + 0.01)), ("right", (TORSO_RADIUS + 0.01))]:
@@ -762,6 +765,8 @@ class PuppetCharacter:
         for g_type, gun in self.weapons_inventory.items():
             slot_idx = gun.cfg["slot"]
             if g_type == self.active_gun_slot:
+                if gun.np.getParent() != self.render:
+                    gun.np.reparentTo(self.render)
                 if g_type == "pistol":
                     # Tactical Two-Handed Weaver Combat Stance (Pushed forward, centered)
                     stance_offset = fwd * (0.24 + kick_z) + rgt * 0.08 + up * 0.30
@@ -775,8 +780,10 @@ class PuppetCharacter:
                 gun.set_hpr(gun.np.getHpr() + wep_rot)
             else:
                 holster_socket = self.back_holster_sockets[slot_idx]
-                gun.set_pos(holster_socket.getPos(self.render))
-                gun.set_hpr(holster_socket.getHpr(self.render))
+                if gun.np.getParent() != holster_socket:
+                    gun.np.reparentTo(holster_socket)
+                    gun.np.setPos(0, 0, 0)
+                    gun.np.setHpr(0, 0, 0)
 
         if self.held_prop:
             lift_s = math.sin(self.lift_progress * math.pi * 0.5)
