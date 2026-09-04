@@ -479,4 +479,37 @@ def solve_two_bone_ik_3d(shoulder, target, l1, l2, pole_vec):
     return elbow
 
 
+def calculate_ricochet_reflection(incident_dir, surface_normal, spread=0.15):
+    """
+    Computes physical reflection vector: R = D - 2*(D . N)*N with randomized surface micro-roughness.
+    Adapted from tactical ballistics & A3P ricochet dynamics.
+    """
+    d = incident_dir.normalized()
+    n = surface_normal.normalized()
+    dot = d.dot(n)
+    refl = d - n * (2.0 * dot)
+    if spread > 0.0:
+        refl.x += (random.random() * 2.0 - 1.0) * spread
+        refl.y += (random.random() * 2.0 - 1.0) * spread
+        refl.z += (random.random() * 2.0 - 1.0) * spread
+    return refl.normalized()
 
+
+def calculate_radial_explosion_impulse(blast_pos, target_pos, max_force, radius, upward_lift=4.5):
+    """
+    Computes radial shockwave impulse from blast center to target position.
+    Applies distance attenuation (1 - d/R) and upward kinetic lift.
+    Adapted from A3P entityGroup.explode radial physics.
+    Returns (impulse_vector, distance_ratio, is_inside_radius).
+    """
+    diff = target_pos - blast_pos
+    dist = diff.length()
+    if dist >= radius or dist < 0.001:
+        return Vec3(0, 0, 0), 0.0, False
+    
+    ratio = max(0.0, min(1.0, 1.0 - (dist / radius)))
+    # Non-linear shockwave falloff: quadratic pressure drop
+    pressure = ratio ** 1.3
+    dir_norm = diff / dist
+    linear_impulse = dir_norm * (max_force * pressure) + Vec3(0, 0, upward_lift * pressure)
+    return linear_impulse, ratio, True

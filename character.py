@@ -106,6 +106,9 @@ class PuppetCharacter:
         self.sfx_callback    = None
         self.shoot_callback  = None
         self.casing_callback = None
+        self.grenade_callback = None
+        self.grenades_count   = 4
+        self.grenade_cooldown = 0.0
 
         self._build(start_pos)
 
@@ -313,6 +316,7 @@ class PuppetCharacter:
     def set_sfx_callback(self, cb): self.sfx_callback = cb
     def set_shoot_callback(self, cb): self.shoot_callback = cb
     def set_casing_callback(self, cb): self.casing_callback = cb
+    def set_grenade_callback(self, cb): self.grenade_callback = cb
 
     def set_skin(self, body_color, glove_color):
         if "torso" in self.skin_nodes:
@@ -566,6 +570,48 @@ class PuppetCharacter:
         if self.held_prop:
             self.throw_held_object()
 
+    def trigger_grenade_throw(self, target_3d_point):
+        if self.grenades_count <= 0 or self.grenade_cooldown > 0.0 or self.knockout_timer > 0.0:
+            return False
+
+        self.grenades_count -= 1
+        self.grenade_cooldown = 0.75
+        self.throw_timer = 0.28
+
+        torso_pos = self.root_np.getPos()
+        fwd = self.get_forward_vector()
+        spawn_pos = torso_pos + fwd * 0.45 + Vec3(0, 0, 0.55)
+
+        aim_diff = target_3d_point - spawn_pos
+        dist = aim_diff.length()
+        if dist > 0.001:
+            aim_dir = aim_diff / dist
+        else:
+            aim_dir = fwd
+
+        toss_speed = max(11.0, min(22.0, dist * 1.30))
+        throw_vel = aim_dir * toss_speed + Vec3(0, 0, 3.8)
+
+        if self.sfx_callback:
+            self.sfx_callback("throw")
+
+        if self.grenade_callback:
+            self.grenade_callback(spawn_pos, throw_vel)
+
+        return True
+
+    def take_blast_impact(self, impulse_vec, blast_dist_ratio):
+        self.physics_body.setActive(True)
+        self.physics_body.applyCentralImpulse(impulse_vec)
+        balance_loss = int(180 * blast_dist_ratio)
+        self.balance = max(0, self.balance - balance_loss)
+        if self.balance < 40:
+            self.footing = False
+            if self.sfx_callback:
+                self.sfx_callback("stun")
+            if self.held_prop:
+                self.throw_held_object()
+
     def _orient_downward_joint(self, joint_np, target_world, origin_pos=None):
         p = origin_pos if origin_pos is not None else joint_np.getPos(self.render)
         self.ik_helper_np.setPos(p)
@@ -596,6 +642,8 @@ class PuppetCharacter:
             self.throw_timer = max(0.0, self.throw_timer - dt)
         if self.gun_fire_timer > 0:
             self.gun_fire_timer = max(0.0, self.gun_fire_timer - dt)
+        if self.grenade_cooldown > 0:
+            self.grenade_cooldown = max(0.0, self.grenade_cooldown - dt)
 
         # Exact 2nd-order damped spring recoil decay
         self.gun_recoil_pitch = self.gun_recoil_spring.update(0.0, dt)

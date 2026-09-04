@@ -17,16 +17,19 @@
 import sys, math, random, pathlib
 from direct.showbase.ShowBase import ShowBase
 from panda3d.core import (Vec3, Vec4, Point3, Filename, DirectionalLight, AmbientLight,
-                           CardMaker, LineSegs, AntialiasAttrib,
+                           PointLight, CardMaker, LineSegs, AntialiasAttrib,
                            loadPrcFileData, TextNode, KeyboardButton,
                            WindowProperties, MouseButton)
 from panda3d.bullet import BulletWorld, BulletPlaneShape, BulletRigidBodyNode
 from direct.gui.OnscreenText import OnscreenText
 
 from physics_constants import *
-from physics_math import SpringDamper1D, SpringDamper3D, CameraTraumaSystem, calculate_off_center_torque, HitStopManager
+from physics_math import (SpringDamper1D, SpringDamper3D, CameraTraumaSystem,
+                          calculate_off_center_torque, HitStopManager,
+                          calculate_ricochet_reflection, calculate_radial_explosion_impulse)
 from character import PuppetCharacter, box_normalize_to_circle
-from props import InteractiveCrate, BowlingPin, GunWeapon, SpentCasing
+from props import (InteractiveCrate, BowlingPin, GunWeapon, SpentCasing,
+                   ThrowableFragGrenade, ExplosiveBarrel)
 
 loadPrcFileData("", "window-title PuppetEngine - Pure Python TPS & Physics Sandbox")
 loadPrcFileData("", "win-size 1280 720")
@@ -89,6 +92,121 @@ class DustPuff:
         return True
 
 
+class KineticSpark:
+    """
+    Directional Kinetic Spark (adapted from A3P SparkParticleGroup):
+    Arcs off bullet impacts and explosions along the reflection vector,
+    drawn as a fast-moving glowing line segment under gravity.
+    """
+    def __init__(self, render, pos, vel, life=0.25):
+        self.render = render
+        self.pos = Point3(pos)
+        self.vel = Vec3(vel)
+        self.life = life
+        self.max_life = life
+        self.ls = LineSegs("spark")
+        self.ls.setColor(1.0, 0.85, 0.35, 1.0)
+        self.ls.setThickness(2.0)
+        self.ls.moveTo(self.pos)
+        self.ls.drawTo(self.pos - self.vel * 0.015)
+        self.np = render.attachNewNode(self.ls.create())
+
+    def update(self, dt):
+        self.life -= dt
+        if self.life <= 0:
+            self.np.removeNode()
+            return False
+        # Gravity on sparks
+        self.vel.z -= 28.0 * dt
+        new_pos = self.pos + self.vel * dt
+        # Bounce off floor if hitting ground
+        if new_pos.z < 0.01:
+            new_pos.z = 0.01
+            self.vel.z = -self.vel.z * 0.35
+            self.vel.x *= 0.65
+            self.vel.y *= 0.65
+        self.pos = new_pos
+
+        self.np.removeNode()
+        self.ls.reset()
+        alpha = max(0.0, self.life / self.max_life)
+        self.ls.setColor(1.0, 0.82 * alpha + 0.15, 0.20 * alpha, alpha)
+        self.ls.setThickness(2.0)
+        self.ls.moveTo(self.pos)
+        self.ls.drawTo(self.pos - self.vel * 0.02)
+        self.np = self.render.attachNewNode(self.ls.create())
+        return True
+
+
+class ExplosionFireball:
+    """
+    Expanding Kinetic Fireball (adapted from A3P ExplosionParticleGroup):
+    Rapidly expands from blast center, shifting from white-hot core to fiery orange,
+    then fading to dark smoke.
+    """
+    def __init__(self, render, loader, pos, radius=1.8):
+        self.render = render
+        self.life = 0.45
+        self.max_life = 0.45
+        self.max_radius = radius
+        self.np = render.attachNewNode(loader.loadModel("models/misc/sphere").node())
+        self.np.setPos(pos)
+        self.np.setScale(0.2)
+        self.np.setColor(1.0, 0.95, 0.8, 1.0)
+
+    def update(self, dt):
+        self.life -= dt
+        if self.life <= 0:
+            self.np.removeNode()
+            return False
+        progress = 1.0 - (self.life / self.max_life)
+        # Expansion curve
+        scale = 0.2 + (self.max_radius - 0.2) * (progress ** 0.6)
+        self.np.setScale(scale)
+        # Color transition: white-hot -> fiery orange -> dark smoke
+        if progress < 0.3:
+            r = 1.0; g = 0.95 - progress * 1.5; b = 0.6 - progress * 1.5; a = 0.95
+        else:
+            p2 = (progress - 0.3) / 0.7
+            r = 0.9 * (1.0 - p2) + 0.15 * p2
+            g = 0.4 * (1.0 - p2) + 0.15 * p2
+            b = 0.1 * (1.0 - p2) + 0.15 * p2
+            a = max(0.0, 0.95 * (1.0 - p2))
+        self.np.setColor(r, g, b, a)
+        return True
+
+
+class DynamicFlashLight:
+    """
+    Zero-Hitch Dynamic Flash Point Light (adapted from A3P Light pooling):
+    Reuses a persistent PointLight attached to render. Flash events trigger
+    instant intensity leaps with exponential decay without causing Panda3D
+    to recompile runtime GLSL shaders.
+    """
+    def __init__(self, render):
+        self.plight = PointLight("dynamic_flash_light")
+        self.plight.setColor(Vec4(0, 0, 0, 1))
+        self.plight.setAttenuation(Vec3(0, 0, 0.05))
+        self.np = render.attachNewNode(self.plight)
+        render.setLight(self.np)
+        self.intensity = 0.0
+        self.base_color = Vec4(1.0, 0.75, 0.3, 1)
+
+    def trigger(self, pos, color=Vec4(1.0, 0.8, 0.35, 1), intensity=1.0):
+        self.np.setPos(pos)
+        self.base_color = color
+        self.intensity = intensity
+        self.plight.setColor(self.base_color * self.intensity)
+
+    def update(self, dt):
+        if self.intensity > 0.001:
+            self.intensity = max(0.0, self.intensity - dt * 9.5)
+            self.plight.setColor(self.base_color * self.intensity)
+        elif self.intensity != 0.0:
+            self.intensity = 0.0
+            self.plight.setColor(Vec4(0, 0, 0, 1))
+
+
 class PuppetEngine(ShowBase):
 
     def __init__(self):
@@ -96,6 +214,7 @@ class PuppetEngine(ShowBase):
         self.disableMouse()
         self.setBackgroundColor(0.14, 0.17, 0.24, 1)
         self.render.setAntialias(AntialiasAttrib.MAuto)
+        self.render.setShaderAuto()
 
         self.bullet = BulletWorld()
         self.bullet.setGravity(Vec3(0, 0, GRAVITY))
@@ -105,14 +224,21 @@ class PuppetEngine(ShowBase):
 
         self.sounds = {}
         sfx_dir = pathlib.Path(__file__).parent / "sfx"
-        for sfx_name in ("punch_whoosh", "punch_hit", "jump", "throw", "stun",
-                         "pistol_shot", "rifle_shot", "shotgun_shot", "reload", "gun_pickup"):
-            p = (sfx_dir / f"{sfx_name}.wav").resolve()
-            if p.exists():
-                fn = Filename.fromOsSpecific(str(p))
-                snd = self.loader.loadSfx(fn)
-                if snd:
-                    self.sounds[sfx_name] = snd
+        sound_names = (
+            "punch_whoosh", "punch_hit", "jump", "throw", "stun",
+            "pistol_shot", "rifle_shot", "shotgun_shot", "reload", "gun_pickup",
+            "ricochet1", "ricochet2", "ricochet3", "grenade", "grenade-bounce",
+            "large-explosion", "large-explosion2"
+        )
+        for sfx_name in sound_names:
+            for ext in (".wav", ".ogg"):
+                p = (sfx_dir / f"{sfx_name}{ext}").resolve()
+                if p.exists():
+                    fn = Filename.fromOsSpecific(str(p))
+                    snd = self.loader.loadSfx(fn)
+                    if snd:
+                        self.sounds[sfx_name] = snd
+                        break
 
         # ── Puppet Character ──
         self.puppet = PuppetCharacter(self.bullet, self.render, self.loader, (0, 0, 0))
@@ -120,6 +246,7 @@ class PuppetEngine(ShowBase):
         self.puppet.set_sfx_callback(self.play_sfx)
         self.puppet.set_shoot_callback(self._execute_bullet_fire)
         self.puppet.set_casing_callback(self._eject_casing)
+        self.puppet.set_grenade_callback(self._spawn_grenade)
 
         self.props = []
         self._spawn_props()
@@ -128,6 +255,9 @@ class PuppetEngine(ShowBase):
         self.tracers    = []
         self.flashes    = []
         self.casings    = []
+        self.sparks     = []
+        self.fireballs  = []
+        self.grenades   = []
 
         cm = CardMaker("shadow")
         cm.setFrame(-0.35, 0.35, -0.35, 0.35)
@@ -182,7 +312,7 @@ class PuppetEngine(ShowBase):
             align=TextNode.ACenter, mayChange=True)
 
         OnscreenText(
-            text="Mouse: Look | LMB: Shoot/Punch | Wheel / +/-: Switch Gun | V: Camera Zoom (3 Angles) | R: Reload",
+            text="Mouse: Look | LMB: Shoot/Punch | G: Frag Grenade | Wheel / +/-: Switch Gun | V: Zoom | R: Reload",
             pos=(0, -0.95), scale=0.034, fg=(0.9, 0.9, 0.9, 0.85),
             align=TextNode.ACenter, mayChange=False)
 
@@ -192,7 +322,8 @@ class PuppetEngine(ShowBase):
         self.mouse_locked = lock
         props = WindowProperties()
         props.setCursorHidden(lock)
-        self.win.requestProperties(props)
+        if hasattr(self.win, "requestProperties"):
+            self.win.requestProperties(props)
 
     def play_sfx(self, name):
         if name in self.sounds:
@@ -224,6 +355,8 @@ class PuppetEngine(ShowBase):
         p_to = Point3(p_from + bullet_dir * 90.0)
 
         self.flashes.append(MuzzleFlash(self.render, self.loader, p_from))
+        if hasattr(self, "flash_light"):
+            self.flash_light.trigger(p_from, Vec4(1.0, 0.85, 0.35, 1), intensity=1.5)
 
         active_gun = self.puppet.get_active_gun()
         if active_gun:
@@ -239,14 +372,30 @@ class PuppetEngine(ShowBase):
                 return
 
             hit_pos = result.getHitPos()
+            hit_norm = result.getHitNormal()
             self.tracers.append(BulletTracer(self.render, p_from, hit_pos))
             self.spawn_dust(hit_pos)
+
+            # Directional kinetic spark burst along surface reflection (A3P inspired)
+            num_sparks = random.randint(7, 14)
+            for _ in range(num_sparks):
+                refl_dir = calculate_ricochet_reflection(bullet_dir, hit_norm, spread=0.35)
+                s_vel = refl_dir * random.uniform(8.0, 18.0) + Vec3(0, 0, random.uniform(1.0, 3.5))
+                self.sparks.append(KineticSpark(self.render, hit_pos, s_vel, life=random.uniform(0.18, 0.32)))
+
+            # Authentic bullet ricochet audio
+            if random.random() < 0.40:
+                ric_keys = [k for k in ("ricochet1", "ricochet2", "ricochet3") if k in self.sounds]
+                if ric_keys:
+                    self.play_sfx(random.choice(ric_keys))
 
             hit_prop_matched = False
             for prop in self.props:
                 if getattr(prop, "node", None) == hit_node:
                     impulse = bullet_dir * bullet_force + Vec3(0, 0, 4.5)
                     prop.apply_impulse(impulse, hit_pos)
+                    if hasattr(prop, "take_damage"):
+                        prop.take_damage(bullet_force * 0.65, hit_pos)
                     self.play_sfx("punch_hit")
                     self.hit_stop.trigger(0.038)
                     hit_prop_matched = True
@@ -266,6 +415,62 @@ class PuppetEngine(ShowBase):
                 self.hit_stop.trigger(0.038)
         else:
             self.tracers.append(BulletTracer(self.render, p_from, p_to))
+
+    def trigger_explosion(self, blast_pos, radius=7.5, max_force=65.0, trauma=0.55, source_obj=None):
+        """
+        Radial shockwave detonation engine (adapted from A3P entityGroup.explode):
+        - Applies inverse-distance impulse and upward kinetic lift to all nearby props.
+        - Triggers camera screen trauma, micro-freeze hitstop, fireball VFX, and spark showers.
+        """
+        sfx_candidates = [k for k in ("large-explosion", "large-explosion2", "grenade") if k in self.sounds]
+        if sfx_candidates:
+            self.play_sfx(random.choice(sfx_candidates))
+        else:
+            self.play_sfx("punch_hit")
+
+        self.trauma_system.add_trauma(trauma)
+        self.hit_stop.trigger(0.065)
+
+        if hasattr(self, "flash_light"):
+            self.flash_light.trigger(blast_pos, Vec4(1.0, 0.70, 0.25, 1), intensity=3.5)
+
+        self.fireballs.append(ExplosionFireball(self.render, self.loader, blast_pos, radius=radius * 0.35))
+        for _ in range(8):
+            offset = Vec3(random.uniform(-0.6, 0.6), random.uniform(-0.6, 0.6), random.uniform(0.1, 0.8))
+            self.dust_puffs.append(DustPuff(self.render, self.loader, blast_pos + offset))
+
+        for _ in range(24):
+            rand_dir = Vec3(random.uniform(-1, 1), random.uniform(-1, 1), random.uniform(0.2, 1.2)).normalized()
+            s_vel = rand_dir * random.uniform(12.0, 26.0)
+            self.sparks.append(KineticSpark(self.render, blast_pos, s_vel, life=random.uniform(0.3, 0.6)))
+
+        # Radial impulse on props
+        for prop in list(self.props):
+            if prop == source_obj or getattr(prop, "is_held", False):
+                continue
+            prop_pos = prop.get_pos()
+            impulse, ratio, is_in = calculate_radial_explosion_impulse(blast_pos, prop_pos, max_force, radius, upward_lift=7.0)
+            if is_in:
+                prop.apply_impulse(impulse, blast_pos)
+                if hasattr(prop, "take_damage"):
+                    prop.take_damage(40.0 * ratio, blast_pos)
+
+        # Radial impulse and balance decay on puppet character
+        puppet_pos = self.puppet.get_torso_pos()
+        p_impulse, p_ratio, p_is_in = calculate_radial_explosion_impulse(blast_pos, puppet_pos, max_force * 0.9, radius, upward_lift=6.0)
+        if p_is_in:
+            self.puppet.take_blast_impact(p_impulse, p_ratio)
+
+    def _spawn_grenade(self, spawn_pos, throw_vel):
+        grenade = ThrowableFragGrenade(
+            self.bullet, self.render, self.loader, spawn_pos, throw_vel,
+            sfx_callback=self.play_sfx,
+            explode_callback=self.trigger_explosion
+        )
+        self.grenades.append(grenade)
+
+    def _do_throw_grenade(self):
+        self.puppet.trigger_grenade_throw(self.current_3d_target)
 
     def _make_ground(self):
         shape = BulletPlaneShape(Vec3(0, 0, 1), 0)
@@ -302,6 +507,8 @@ class PuppetEngine(ShowBase):
         a.setColor(Vec4(0.38, 0.40, 0.48, 1))
         self.render.setLight(self.render.attachNewNode(a))
 
+        self.flash_light = DynamicFlashLight(self.render)
+
     def _spawn_props(self):
         crate_pos = [
             (2.5,  2.0, 0.3), (2.5,  2.0, 0.9), (3.1,  2.0, 0.3),
@@ -327,10 +534,23 @@ class PuppetEngine(ShowBase):
         self.props.append(GunWeapon(self.bullet, self.render, self.loader, (-2.5, 4.0, 0.2), "rifle"))
         self.props.append(GunWeapon(self.bullet, self.render, self.loader, ( 2.5, 4.0, 0.2), "shotgun"))
 
+        # Hazardous Explosive Fuel Barrels (A3P inspired)
+        barrel_positions = [
+            ( 1.8,  3.6, 0.38),
+            (-2.2,  3.8, 0.38),
+            ( 4.2, -1.8, 0.38),
+            (-3.8, -2.2, 0.38),
+        ]
+        for b_pos in barrel_positions:
+            barrel = ExplosiveBarrel(self.bullet, self.render, self.loader, b_pos)
+            barrel.set_callbacks(self.trigger_explosion, self.play_sfx)
+            self.props.append(barrel)
+
     def _bind_actions(self):
         for pk in ("mouse1", "f", "F", "j", "J"): self.accept(pk, self._do_primary_click)
         for ek in ("mouse3", "e", "E"): self.accept(ek, self._do_pickup)
         for rk in ("r", "R"): self.accept(rk, self.puppet.trigger_reload)
+        for gk in ("g", "G"): self.accept(gk, self._do_throw_grenade)
 
         # Mouse Scroll & +/- Weapon Switching
         self.accept("wheel_up",   lambda: self.puppet.cycle_weapon(1))
@@ -380,7 +600,7 @@ class PuppetEngine(ShowBase):
         dt = self.hit_stop.process_dt(raw_dt)
 
         # ── UNRESTRICTED FULL 360° MOUSE LOOK ──
-        if self.mouse_locked and self.mouseWatcherNode.hasMouse():
+        if self.mouse_locked and getattr(self, "mouseWatcherNode", None) and self.mouseWatcherNode.hasMouse():
             md = self.win.getPointer(0)
             cx = self.win.getXSize() // 2
             cy = self.win.getYSize() // 2
@@ -448,7 +668,7 @@ class PuppetEngine(ShowBase):
             self.current_3d_target = p_to
 
         # ── DIRECT HARDWARE POLLING (Continuous Shooting & Movement) ──
-        is_btn = self.mouseWatcherNode.isButtonDown
+        is_btn = self.mouseWatcherNode.isButtonDown if getattr(self, "mouseWatcherNode", None) else lambda k: False
         w_down = is_btn(KeyboardButton.asciiKey('w')) or is_btn(KeyboardButton.up())
         s_down = is_btn(KeyboardButton.asciiKey('s')) or is_btn(KeyboardButton.down())
         a_down = is_btn(KeyboardButton.asciiKey('a')) or is_btn(KeyboardButton.left())
@@ -499,19 +719,20 @@ class PuppetEngine(ShowBase):
             self.prompt_text.setText("")
 
         # ── WEAPON & AMMO HUD UPDATE ──
+        grenade_tag = f"  |  FRAG: {self.puppet.grenades_count} [G]"
         if self.puppet.is_holding_gun():
             self.crosshair.show()
             gun = self.puppet.get_active_gun()
             if self.puppet.is_reloading:
-                self.hud_ammo.setText(f"[{gun.name.upper()}]  |  [RELOADING...]")
+                self.hud_ammo.setText(f"[{gun.name.upper()}]  |  [RELOADING...]{grenade_tag}")
             else:
-                self.hud_ammo.setText(f"[{gun.name.upper()}]  |  AMMO: {gun.ammo_mag} / {gun.ammo_reserve}")
+                self.hud_ammo.setText(f"[{gun.name.upper()}]  |  AMMO: {gun.ammo_mag} / {gun.ammo_reserve}{grenade_tag}")
         elif self.puppet.held_prop:
             self.crosshair.hide()
-            self.hud_ammo.setText(f"[HOLDING {self.puppet.held_prop.name.upper()}]")
+            self.hud_ammo.setText(f"[HOLDING {self.puppet.held_prop.name.upper()}]{grenade_tag}")
         else:
             self.crosshair.hide()
-            self.hud_ammo.setText("[UNARMED] (PUNCH / THROW)")
+            self.hud_ammo.setText(f"[UNARMED] (PUNCH / THROW){grenade_tag}")
 
         # Update VFX
         active_dust = [p for p in self.dust_puffs if p.update(dt)]
@@ -523,13 +744,28 @@ class PuppetEngine(ShowBase):
         active_flashes = [f for f in self.flashes if f.update(dt)]
         self.flashes = active_flashes
 
+        active_sparks = [s for s in self.sparks if s.update(dt)]
+        self.sparks = active_sparks
+
+        active_fireballs = [f for f in self.fireballs if f.update(dt)]
+        self.fireballs = active_fireballs
+
+        # Update Throwable Frag Grenades
+        active_grenades = [g for g in self.grenades if g.update(dt)]
+        self.grenades = active_grenades
+
+        # Update Dynamic Flash Light
+        if hasattr(self, "flash_light"):
+            self.flash_light.update(dt)
+
         # Update Physical Spent Shell Casings
         self.casings = [c for c in self.casings if c.update(dt)]
 
-        # Update Prop Aerodynamics (Quadratic Drag & Rotational Resistance)
+        # Update Prop Aerodynamics & Clean Destroyed Props
         for prop in self.props:
             if hasattr(prop, "update_physics"):
                 prop.update_physics(dt)
+        self.props = [p for p in self.props if not getattr(p, "has_exploded", False)]
 
         # Step Bullet physics
         self.bullet.doPhysics(dt, 10, 1.0 / 180.0)

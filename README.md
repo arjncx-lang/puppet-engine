@@ -29,6 +29,7 @@ PuppetEngine fuses the **organic clay-puppet physics and procedural spring-dampe
 - **Industry-Standard Two-Ray Aiming:** Eliminates parallax error by casting a camera sightline ray through the screen center crosshair and mapping physical bullet trajectories directly to the 3D impact point.
 - **PUBG-Style Visible Back-Holster System:** Weapons stored in inventory but not active in hands are realistically slung across the spine sockets on the character's back.
 - **Layered Simultaneous Action Channels:** Punch, sprint, jump, aim, and carry items simultaneously without action locking or animation cancellation.
+- **A3P-Inspired Tactical Ballistics & Explosives:** Throwable fragmentation grenades (`G`), explosive hazard fuel barrels with chain reactions, kinetic bullet ricochets with surface reflection spark showers, and zero-hitch dynamic flash point lighting.
 
 ---
 
@@ -84,13 +85,14 @@ Character stability is measured from $0$ to $255$ balance points. In mid-air or 
 
 | Control | Action | Details |
 |---|---|---|
-| **`Move Mouse`** | **Free 360° Look & Aim** | Unrestricted horizontal & vertical pitch ($-55^\\circ$ to $+80^\\circ$) |
+| **`Move Mouse`** | **Free 360° Look & Aim** | Unrestricted horizontal & vertical pitch ($-55^\circ$ to $+80^\circ$) |
 | **`Left Click` (Hold)** | **Continuous Shoot / Punch** | Full-auto for Rifle, semi-auto for Pistol/Shotgun, punches when unarmed |
 | **`Right Click` / `E`** | **Pick Up / Take Ammo / Throw** | Equips weapons, harvests reserve ammo on duplicates, lifts/throws props |
+| **`G` Key** | **Throw Tactical Frag Grenade** | Bouncing physical grenade with 2.2s fuse, bounce SFX, and devastating radial shockwave |
 | **`Mouse Scroll Wheel`** | **Cycle Weapons** | Scroll up/down to cycle forward/backward through inventory |
 | **`+` / `-` Keys** | **Cycle Weapons** | Alternative keyboard weapon cycling |
 | **`1`, `2`, `3`** | **Direct Weapon Slot** | Instantly select Pistol (`1`), Assault Rifle (`2`), or Shotgun (`3`) |
-| **`V` Key** | **3-Stage Camera Zoom** | Cycles: `4.2m` (Tight Aim) $\\rightarrow$ `7.0m` (Standard) $\\rightarrow$ `11.5m` (Wide) |
+| **`V` Key** | **3-Stage Camera Zoom** | Cycles: `4.2m` (Tight Aim) $\rightarrow$ `7.0m` (Standard) $\rightarrow$ `11.5m` (Wide) |
 | **`R` Key** | **Reload Magazine** | Refills magazine from reserve ammo with realistic cocking audio |
 | **`SHIFT` + `WASD`** | **Sprint / Tactical Strafe** | Full sprint with athletic torso lean and lateral strafe alignment |
 | **`SPACE`** | **Jump** | Mid-air bicycle kick with upward impulse |
