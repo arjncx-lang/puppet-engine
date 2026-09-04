@@ -513,3 +513,81 @@ def calculate_radial_explosion_impulse(blast_pos, target_pos, max_force, radius,
     dir_norm = diff / dist
     linear_impulse = dir_norm * (max_force * pressure) + Vec3(0, 0, upward_lift * pressure)
     return linear_impulse, ratio, True
+
+
+def calculate_ballistica_arm_swing(roll_amt, run_gas, is_female=False):
+    """
+    Computes Ballistica's quadrature elliptical running arm kinematics (spaz_node.cc:2935-2972).
+    Blends smoothly from relaxed walking sways to high-frequency athletic running pumps:
+    v1run = sin(roll + pi/2) * 0.20, v2run = cos(roll) * 0.30
+    v1 = sin(roll) * 0.05, v2 = cos(roll) * 0.60
+    Returns: ((l_pitch, l_roll, l_elbow), (r_pitch, r_roll, r_elbow))
+    """
+    blend = run_gas * run_gas
+    inv_blend = 1.0 - run_gas
+    wave_amt = roll_amt
+
+    v1run = math.sin(wave_amt + math.pi * 0.5) * 0.20
+    v2run = math.cos(wave_amt) * 0.30
+    v1 = math.sin(wave_amt) * 0.05
+    v2 = math.cos(wave_amt) * (0.30 if is_female else 0.55)
+
+    # Ballistica anchor target mapping
+    anchor_y_left = (-v1run - 0.15) * blend + (-v1 - 0.10) * inv_blend
+    anchor_z_left = (-v2run + 0.15) * blend + (-v2 + 0.10) * inv_blend
+
+    anchor_y_right = (v1run - 0.15) * blend + (v1 - 0.10) * inv_blend
+    anchor_z_right = (v2run + 0.15) * blend + (v2 + 0.10) * inv_blend
+
+    # Convert coordinates to anatomical joint pitch/roll/elbow
+    l_pitch = math.degrees(math.atan2(anchor_z_left, 0.38))
+    r_pitch = math.degrees(math.atan2(anchor_z_right, 0.38))
+
+    l_elbow = -14.0 - blend * (38.0 + v1run * 55.0)
+    r_elbow = -14.0 - blend * (38.0 - v1run * 55.0)
+
+    l_roll = -10.0 - blend * 6.0
+    r_roll = 10.0 + blend * 6.0
+
+    return (l_pitch, l_roll, l_elbow), (r_pitch, r_roll, r_elbow)
+
+
+def calculate_ballistica_punch_momentum(angular_vel, linear_vel, prev_ang_d, prev_ang_m, prev_lin_d, prev_lin_m):
+    """
+    Integrates Ballistica's angular and linear punch momentum accumulators (spaz_node.cc:2060-2086).
+    Builds up momentum during high-speed rotation and forward sprinting to augment punch impact.
+    Returns: (ang_d, ang_m, lin_d, lin_m)
+    """
+    abs_a_vel = min(25.0, abs(angular_vel))
+    ang_d = prev_ang_d + abs_a_vel * 0.0004
+    ang_d *= 0.965
+    ang_m = prev_ang_m + ang_d
+    ang_m *= 0.92
+    if abs_a_vel < 5.0:
+        ang_m *= 0.8 + 0.2 * (abs_a_vel / 5.0)
+
+    lin_d = prev_lin_d + linear_vel * 0.004
+    lin_d *= 0.95
+    lin_m = prev_lin_m + lin_d
+    lin_m *= 0.96
+    if linear_vel < 5.0:
+        lin_m *= 0.9 + 0.1 * (linear_vel / 5.0)
+
+    return ang_d, ang_m, lin_d, lin_m
+
+
+def calculate_ballistica_airborne_flail(anim_time):
+    """
+    Computes Ballistica's counter-rotating circular arm and leg flail when airborne with zero balance (spaz_node.cc:2838-2859).
+    """
+    wave_amt = anim_time * 11.0
+    v1 = math.sin(wave_amt) * 30.0
+    v2 = math.cos(wave_amt) * 26.0
+
+    l_arm = (0.0, -55.0 + v1, -25.0 + v2 * 0.4)
+    l_elbow = (0.0, -35.0 - v2 * 0.5, 0.0)
+    r_arm = (0.0, -55.0 - v1, 25.0 - v2 * 0.4)
+    r_elbow = (0.0, -35.0 + v2 * 0.5, 0.0)
+
+    return l_arm, l_elbow, r_arm, r_elbow
+

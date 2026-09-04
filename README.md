@@ -51,22 +51,31 @@ PuppetEngine fuses the **organic clay-puppet physics and procedural spring-dampe
 ### 1. Vector Normalization (`BoxNormalizeToCircle`)
 Eliminates diagonal speed exploits (e.g. $W+D$ moving $\sqrt{2} \times$ faster) while preserving analog stick fidelity:
 
-$$\\vec{v}_{\\text{norm}} = \\vec{v}_{\\text{raw}} \\cdot \\frac{1}{\\sqrt{\\left(\\frac{v_x}{\\max(|v_x|, |v_y|)}\\right)^2 + \\left(\\frac{v_y}{\\max(|v_x|, |v_y|)}\\right)^2}}$$
+$$\vec{v}_{\text{norm}} = \vec{v}_{\text{raw}} \cdot \frac{1}{\sqrt{\left(\frac{v_x}{\max(|v_x|, |v_y|)}\right)^2 + \left(\frac{v_y}{\max(|v_x|, |v_y|)}\right)^2}}$$
 
 ### 2. Dynamic Footing & Balance System
 Character stability is measured from $0$ to $255$ balance points. In mid-air or during high-impact stumbles, balance decays, triggering flailing bicycle kicks until stable footing is restored on ground contacts.
 
-### 3. 3-Phase Spring Punch Physics
-1. **Anticipation Phase ($0\\text{ ms} - 80\\text{ ms}$):** Arm winds back behind shoulder ($\\theta = +25^\\circ$), torso coils backward ($-15^\\circ$), non-punching fist anchors to chest.
-2. **Maximum Velocity Forward Thrust ($80\\text{ ms} - 200\\text{ ms}$):** Fist rockets forward $0.70\\text{ m}$ ($\\theta = -90^\\circ$), torso violently twists forward ($+24^\\circ$).
-3. **Damped Spring Recovery ($200\\text{ ms} - 300\\text{ ms}$):** Spring-damper forces smoothly return limbs and torso to neutral idle stance.
-4. **360° Tornado Spin Punch:** Triggers when punching while rotating, spinning the character in a full $360^\\circ$ horizontal spiral with double kinetic impulse ($2.4\\times$).
+### 3. 3-Phase Spring Punch & Ballistica Momentum Physics
+1. **Anticipation Phase ($0\text{ ms} - 80\text{ ms}$):** Arm winds back behind shoulder ($\theta = +25^\circ$), torso coils backward ($-15^\circ$), non-punching fist anchors to chest.
+2. **Maximum Velocity Forward Thrust ($80\text{ ms} - 200\text{ ms}$):** Fist rockets forward $0.70\text{ m}$ ($\theta = -90^\circ$), torso violently twists forward ($+24^\circ$).
+3. **Damped Spring Recovery ($200\text{ ms} - 300\text{ ms}$):** Spring-damper forces smoothly return limbs and torso to neutral idle stance.
+4. **360° Tornado Spin Punch:** Triggers when punching while rotating, spinning the character in a full $360^\circ$ horizontal spiral with double kinetic impulse ($2.4\times$).
+5. **Ballistica Angular & Linear Momentum Accumulators:** Rotational angular velocity ($|\omega|$) and sprint velocity ($v$) feed 2-stage leaky integrators (`punch_mom_ang_m`, `punch_mom_lin_m`) that scale punch impulse up to $+150\%$, rewarding agile spinning strikes and sprint-punch combos.
+6. **Spin-Coupled Dynamic Punch Hand Selection:** When spinning ($|\omega| > 0.35\text{ rad/s}$), punch hand automatically selects the leading centrifugal fist ($R$ on right spin, $L$ on left spin).
 
-### 4. Two-Ray Parallax-Free Aiming
-1. **Ray 1 (Camera Aim Sightline):** Casts a ray from camera lens $\\vec{C}$ through center crosshair $\\hat{F}_{\\text{cam}}$:
-   $$\\vec{P}_{\\text{target}} = \\text{RayCastClosest}(\\vec{C}, \\vec{C} + 100 \\cdot \\hat{F}_{\\text{cam}})$$
-2. **Ray 2 (Physical Bullet Trajectory):** Fires kinetic projectile from muzzle origin $\\vec{M}$ to $\\vec{P}_{\\text{target}}$:
-   $$\\hat{D}_{\\text{bullet}} = \\frac{\\vec{P}_{\\text{target}} - \\vec{M}}{\\|\\vec{P}_{\\text{target}} - \\vec{M}\\|}$$
+### 4. Ballistica Procedural Clay-Puppet Biomechanics (`spaz_node.cc`)
+- **Quadrature Elliptical Running Arm Swing:** Running arm swings use an out-of-phase quadrature pump ($\sin(\text{roll} + \pi/2) \cdot 0.20$ vs $\cos(\text{roll}) \cdot 0.30$) blended with $run\_gas^2$, creating organic athletic circular arm pumping rather than flat planar swings.
+- **Asymmetric Run Gas Smoothing:** Accelerates with higher responsiveness ($0.95$) than deceleration ($0.65$), with immediate airborne bleed.
+- **Organic Breathing Oscillations:** Idle stance applies vertical oscillation ($z \pm \sin(3.6t) \cdot 0.012\text{ m}$) simulating ribcage breathing.
+- **Dual-Grip Prop Placement & Look-Up Pitch:** Overhead prop/crate carry aligns hands snugly to crate sides ($[\pm 0.15, -0.04, +0.02]\text{ m}$) and tilts head upward $+28.6^\circ$ ($+0.5\text{ rad}$) so the puppet looks past the held object.
+- **Airborne Counter-Rotating Flail Kinematics:** When footing is lost in mid-air, dual counter-rotating phase-shifted circular arm waves simulate frantic ragdoll recovery flailing.
+
+### 5. Two-Ray Parallax-Free Aiming
+1. **Ray 1 (Camera Aim Sightline):** Casts a ray from camera lens $\vec{C}$ through center crosshair $\hat{F}_{\text{cam}}$:
+   $$\vec{P}_{\text{target}} = \text{RayCastClosest}(\vec{C}, \vec{C} + 100 \cdot \hat{F}_{\text{cam}})$$
+2. **Ray 2 (Physical Bullet Trajectory):** Fires kinetic projectile from muzzle origin $\vec{M}$ to $\vec{P}_{\text{target}}$:
+   $$\hat{D}_{\text{bullet}} = \frac{\vec{P}_{\text{target}} - \vec{M}}{\|\vec{P}_{\text{target}} - \vec{M}\|}$$
 
 ---
 

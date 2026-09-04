@@ -19,6 +19,9 @@ from physics_math import (
     calculate_slope_foot_alignment,
     ProceduralWeaponController,
     solve_two_bone_ik_3d,
+    calculate_ballistica_arm_swing,
+    calculate_ballistica_punch_momentum,
+    calculate_ballistica_airborne_flail,
 )
 from props import make_sharp_box
 
@@ -74,6 +77,12 @@ class PuppetCharacter:
         self.punch_right     = False
         self.punch_cooldown  = 0.0
         self.is_spin_punch   = False
+
+        # Ballistica Angular & Linear Punch Momentum Accumulators (spaz_node.cc:2060-2086)
+        self.punch_mom_ang_d = 0.0
+        self.punch_mom_ang_m = 0.0
+        self.punch_mom_lin_d = 0.0
+        self.punch_mom_lin_m = 0.0
 
         # PUBG Multi-Weapon Inventory & Back Holsters
         self.weapons_inventory = {}     # { "pistol": gun_obj, "rifle": gun_obj, "shotgun": gun_obj }
@@ -466,7 +475,12 @@ class PuppetCharacter:
 
         self.punch_timer = PUNCH_DURATION
         self.punch_cooldown = PUNCH_DURATION * 0.7
-        self.punch_right = not self.punch_right
+
+        # Ballistica dynamic hand selection: couple punch hand to spin direction if turning fast
+        if abs(self.angular_vel_y) < 0.35:
+            self.punch_right = not self.punch_right
+        else:
+            self.punch_right = (self.angular_vel_y > 0.0)
 
         if self.sfx_callback:
             self.sfx_callback("punch_whoosh")
@@ -479,7 +493,10 @@ class PuppetCharacter:
 
         hit_reach = 1.35 if self.is_spin_punch else 0.95
         punch_point = torso_pos + fwd * (0.68 if not self.is_spin_punch else 0.0)
-        impulse_mag = PUNCH_IMPULSE * (SPIN_PUNCH_MULT if self.is_spin_punch else 1.0)
+
+        # Ballistica momentum scaling: angular and linear sprint velocity augment impact force
+        momentum_mult = 1.0 + min(1.5, self.punch_mom_ang_m * 0.45 + self.punch_mom_lin_m * 0.35)
+        impulse_mag = PUNCH_IMPULSE * (SPIN_PUNCH_MULT if self.is_spin_punch else 1.0) * momentum_mult
 
         hit_any = False
         for target in targets_list:
@@ -497,6 +514,7 @@ class PuppetCharacter:
             self.sfx_callback("punch_hit")
 
         return True
+
 
     def trigger_pickup(self, targets_list):
         if self.knockout_timer > 0.0:
@@ -732,7 +750,11 @@ class PuppetCharacter:
             speed_limit *= 0.90
 
         target_gas = (horiz_speed / speed_limit) if is_moving else 0.0
-        self.run_gas += (target_gas - self.run_gas) * min(1.0, dt * 12.0)
+        smoothing = 0.95 if target_gas > self.run_gas else 0.65
+        self.run_gas = smoothing * self.run_gas + (1.0 - smoothing) * target_gas
+        if not self.footing:
+            self.run_gas = max(0.0, self.run_gas - dt * 2.0)
+
 
         if self.is_holding_gun():
             cur_h = self.root_np.getH()
@@ -780,6 +802,26 @@ class PuppetCharacter:
         safe_v, safe_w = clamp_kinetic_energy(body.getLinearVelocity(), body.getAngularVelocity(), 6.0, MAX_KINETIC_ENERGY)
         body.setLinearVelocity(safe_v)
         body.setAngularVelocity(safe_w)
+
+        # Ballistica cyclical gait roll amount & momentum accumulator integration
+        if self.footing and horiz_speed > 0.1:
+            self.roll_amt += horiz_speed * dt * 9.5
+            if self.roll_amt > 2.0 * math.pi:
+                self.roll_amt -= 2.0 * math.pi
+        else:
+            self.roll_amt *= max(0.0, 1.0 - dt * 4.0)
+
+        self.punch_mom_ang_d, self.punch_mom_ang_m, self.punch_mom_lin_d, self.punch_mom_lin_m = (
+            calculate_ballistica_punch_momentum(
+                angular_vel=self.angular_vel_y,
+                linear_vel=cur_v.length(),
+                prev_ang_d=self.punch_mom_ang_d,
+                prev_ang_m=self.punch_mom_ang_m,
+                prev_lin_d=self.punch_mom_lin_d,
+                prev_lin_m=self.punch_mom_lin_m,
+            )
+        )
+
 
         if do_jump and self.jump_ready and self.footing:
             body.setLinearVelocity(Vec3(new_vx, new_vy, JUMP_VELOCITY))
@@ -881,10 +923,15 @@ class PuppetCharacter:
         foot_p = self.foot_pitch_spring.update(target_fp, dt)
         foot_r = self.foot_roll_spring.update(target_fr, dt)
 
-        # ── CYCLOIDAL GAIT KINEMATICS (Zero Ground Slip) ──
+        # ── CYCLOIDAL GAIT KINEMATICS (Zero Ground Slip with Ballistica Stride Extension) ──
         if self.footing:
             if speed > 0.25:
-                stride_len = GAIT_STRIDE_BASE + (GAIT_STRIDE_SPRINT - GAIT_STRIDE_BASE) * min(1.0, speed / SPRINT_SPEED)
+                # Ballistica stride reach and step lift scaling
+                stride_reach_mult = 1.0 + 0.38 * self.run_gas
+                step_lift_mult = 1.0 + 0.35 * self.run_gas
+                stride_len = (GAIT_STRIDE_BASE + (GAIT_STRIDE_SPRINT - GAIT_STRIDE_BASE) * min(1.0, speed / SPRINT_SPEED)) * stride_reach_mult
+                effective_step_height = GAIT_STEP_HEIGHT * step_lift_mult
+
                 stride_mult = (1.2 if self.ice_mode else (1.6 if is_sprinting else 1.3))
                 self.gait_phase += (speed / max(0.1, stride_len)) * dt * (2.0 * math.pi) * stride_mult
                 if self.gait_phase > 2.0 * math.pi:
@@ -894,13 +941,13 @@ class PuppetCharacter:
                         self.dust_callback((t_pos.x, t_pos.y, 0.02))
 
                 # Exact cycloidal displacement for left and right feet
-                l_x, l_z = cycloidal_step_displacement(self.gait_phase, stride_len, GAIT_STEP_HEIGHT)
-                r_x, r_z = cycloidal_step_displacement(self.gait_phase + math.pi, stride_len, GAIT_STEP_HEIGHT)
+                l_x, l_z = cycloidal_step_displacement(self.gait_phase, stride_len, effective_step_height)
+                r_x, r_z = cycloidal_step_displacement(self.gait_phase + math.pi, stride_len, effective_step_height)
 
                 l_pitch = math.degrees(math.atan2(l_x, LEG_LENGTH * 1.1))
                 r_pitch = math.degrees(math.atan2(r_x, LEG_LENGTH * 1.1))
-                l_lift = (l_z / GAIT_STEP_HEIGHT) * 15.0
-                r_lift = (r_z / GAIT_STEP_HEIGHT) * 15.0
+                l_lift = (l_z / effective_step_height) * 15.0
+                r_lift = (r_z / effective_step_height) * 15.0
 
                 self.leg_pivots["left"].setHpr(0, l_pitch + l_lift + foot_p, foot_r)
                 self.leg_pivots["right"].setHpr(0, r_pitch + r_lift + foot_p, foot_r)
@@ -971,9 +1018,9 @@ class PuppetCharacter:
                 target_torso_pos = Vec3(0, 0, torso_bob)
                 target_torso_hpr = Vec3(0, torso_pitch, torso_roll)
             else:
-                breath = math.sin(self.anim_time * 3.5)
+                breath = math.sin(self.anim_time * 3.6)
                 sway   = math.cos(self.anim_time * 1.8)
-                target_torso_pos = Vec3(0, 0, breath * 0.008)
+                target_torso_pos = Vec3(0, 0, breath * 0.012)
                 target_torso_hpr = Vec3(sway * 1.2, breath * 1.5, 0)
         else:
             target_torso_hpr = Vec3(0, -8.0, 0)
@@ -1003,7 +1050,8 @@ class PuppetCharacter:
             target_head_hpr = Vec3(-torso_blade_yaw, -pitch_deg * 0.5, 0)
         elif self.held_prop:
             lift_s = math.sin(self.lift_progress * math.pi * 0.5)
-            head_look_up = 26.0 * lift_s
+            # Ballistica head tilt (+0.5 rad = 28.6 deg): look past the held object
+            head_look_up = 28.6 * lift_s
             target_head_hpr = Vec3(0, head_look_up + self.head_jolt_pitch, 0)
         elif self.footing:
             if speed > 0.3:
@@ -1048,26 +1096,27 @@ class PuppetCharacter:
                 self._orient_downward_joint(self.elbow_pivots["left"], l_target, l_elbow)
 
         elif self.held_prop:
-            # ── TWO-HANDED PHYSICAL CRATE HOLDING IK ──
+            # ── BALLISTICA TWO-HANDED PROP CARRY IK (spaz_node.cc / prop_node.cc) ──
             p_crate = self.held_prop.get_pos()
             fwd = self.get_forward_vector()
             rgt = Vec3(fwd.y, -fwd.x, 0)
             up  = Vec3(0, 0, 1)
 
-            crate_left  = p_crate - rgt * 0.20 + up * 0.02
-            crate_right = p_crate + rgt * 0.20 + up * 0.02
+            # Ballistica grip targets: prop +/- right * 0.15 - up * 0.04 + fwd * 0.02
+            crate_left  = p_crate - rgt * 0.15 - up * 0.04 + fwd * 0.02
+            crate_right = p_crate + rgt * 0.15 - up * 0.04 + fwd * 0.02
 
             L1 = self.arm_l1
             L2 = self.arm_l2
 
             l_sh_pos = self.arm_pivots["left"].getPos(self.render)
-            l_pole = -rgt * 0.85 - up * 0.40
+            l_pole = -rgt * 0.85 - up * 0.35 + fwd * 0.20
             l_elbow = solve_two_bone_ik_3d(l_sh_pos, crate_left, L1, L2, l_pole)
             self._orient_downward_joint(self.arm_pivots["left"], l_elbow, l_sh_pos)
             self._orient_downward_joint(self.elbow_pivots["left"], crate_left, l_elbow)
 
             r_sh_pos = self.arm_pivots["right"].getPos(self.render)
-            r_pole = rgt * 0.85 - up * 0.40
+            r_pole = rgt * 0.85 - up * 0.35 + fwd * 0.20
             r_elbow = solve_two_bone_ik_3d(r_sh_pos, crate_right, L1, L2, r_pole)
             self._orient_downward_joint(self.arm_pivots["right"], r_elbow, r_sh_pos)
             self._orient_downward_joint(self.elbow_pivots["right"], crate_right, r_elbow)
@@ -1139,26 +1188,26 @@ class PuppetCharacter:
 
         elif self.footing:
             if speed > 0.3:
-                stride_phase = self.gait_phase
-                gas  = self.run_gas
-                l_arm_pitch = -math.sin(stride_phase) * (36.0 + gas * 22.0)
-                r_arm_pitch =  math.sin(stride_phase) * (36.0 + gas * 22.0)
-                self.arm_pivots["left"].setHpr(0, l_arm_pitch, -10.0)
-                self.elbow_pivots["left"].setHpr(0, min(0.0, -l_arm_pitch * 0.35 - 14.0), 0)
-                self.arm_pivots["right"].setHpr(0, r_arm_pitch, 10.0)
-                self.elbow_pivots["right"].setHpr(0, min(0.0, -r_arm_pitch * 0.35 - 14.0), 0)
+                # Ballistica Quadrature Elliptical Arm Swing (spaz_node.cc:2935-2972)
+                (l_p, l_r, l_elb), (r_p, r_r, r_elb) = calculate_ballistica_arm_swing(self.roll_amt, self.run_gas)
+                self.arm_pivots["left"].setHpr(0, l_p, l_r)
+                self.elbow_pivots["left"].setHpr(0, l_elb, 0)
+                self.arm_pivots["right"].setHpr(0, r_p, r_r)
+                self.elbow_pivots["right"].setHpr(0, r_elb, 0)
             else:
-                breath = math.sin(self.anim_time * 3.5)
+                breath = math.sin(self.anim_time * 3.6)
                 self.arm_pivots["left"].setHpr(0, breath * 2.5, -10.0)
                 self.elbow_pivots["left"].setHpr(0, -14.0, 0)
                 self.arm_pivots["right"].setHpr(0, -breath * 2.5, 10.0)
                 self.elbow_pivots["right"].setHpr(0, -14.0, 0)
         else:
-            wave1 = math.sin(self.anim_time * 14.0) * 25.0
-            self.arm_pivots["left"].setHpr(0, -65.0 + wave1, -25.0)
-            self.elbow_pivots["left"].setHpr(0, -35.0, 0)
-            self.arm_pivots["right"].setHpr(0, -65.0 - wave1, 25.0)
-            self.elbow_pivots["right"].setHpr(0, -35.0, 0)
+            # Ballistica Airborne Counter-Rotating Flail Kinematics (spaz_node.cc:2838-2859)
+            l_arm, l_elb, r_arm, r_elb = calculate_ballistica_airborne_flail(self.anim_time)
+            self.arm_pivots["left"].setHpr(l_arm[0], l_arm[1], l_arm[2])
+            self.elbow_pivots["left"].setHpr(l_elb[0], l_elb[1], l_elb[2])
+            self.arm_pivots["right"].setHpr(r_arm[0], r_arm[1], r_arm[2])
+            self.elbow_pivots["right"].setHpr(r_elb[0], r_elb[1], r_elb[2])
+
 
     def get_torso_pos(self):
         return self.root_np.getPos()
