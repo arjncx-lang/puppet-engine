@@ -12,10 +12,10 @@
 
 Building a 3D game engine from scratch has been a **long-term childhood dream of mine**, and **PuppetEngine** is the result of that journey!
 
-For character movement and biomechanics, I heavily referenced and took inspiration from **[Ballistica](https://github.com/efroemling/ballistica)** (the open-source engine behind *BombSquad*). I love how alive, expressive, and bouncy the clay-puppet characters feel in Ballistica—so I incorporated its organic spring-damper joint physics, harmonic running arm swings, dynamic footing and balance decay, and punch momentum into pure Python.
+For character movement and biomechanics, I heavily referenced and took inspiration from **[Ballistica](https://github.com/efroemling/ballistica)** (the open-source engine behind *BombSquad*). I love how alive, expressive, and bouncy the clay-puppet characters feel in Ballistica, so I incorporated its organic spring-damper joint physics, harmonic running arm swings, dynamic footing and balance decay, and punch momentum into pure Python.
 
 ### 💡 Ultra-Lightweight with Endless Possibilities
-- **Zero Asset Bloat:** The entire engine is super small (just a few hundred KB of code, practically zero MB). All 3D weapon meshes, character limbs, and arena props are generated procedurally on startup—no massive multi-gigabyte asset downloads required!
+- **Zero Asset Bloat:** The entire engine is super small (just a few hundred KB of code, practically zero MB). All 3D weapon meshes, character limbs, and arena props are generated procedurally on startup, with no massive multi-gigabyte asset downloads required!
 - **Endless Possibilities:** Because the whole engine is written in clean, modular Python using Panda3D and Bullet physics, it's super easy to hack on. You can tweak spring stiffness, add new procedural weapons, create custom arenas, build minigames, or plug in your own multiplayer networking!
 
 ---
@@ -109,4 +109,4 @@ puppet-engine/
 
 ## 📜 License
 
-This project is licensed under the [MIT License](LICENSE) — feel free to learn from it, build on top of it, or use it in your own creative projects!
+This project is licensed under the [MIT License](LICENSE). Feel free to learn from it, build on top of it, or use it in your own creative projects!
