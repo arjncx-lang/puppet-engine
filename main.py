@@ -355,8 +355,6 @@ class PuppetEngine(ShowBase):
         p_to = Point3(p_from + bullet_dir * 90.0)
 
         self.flashes.append(MuzzleFlash(self.render, self.loader, p_from))
-        if hasattr(self, "flash_light"):
-            self.flash_light.trigger(p_from, Vec4(1.0, 0.85, 0.35, 1), intensity=1.5)
 
         active_gun = self.puppet.get_active_gun()
         if active_gun:
@@ -570,6 +568,7 @@ class PuppetEngine(ShowBase):
 
         for kk in ("k", "K"): self.accept(kk, lambda: self.puppet.trigger_knockout(1.5))
         for hk in ("h", "H"): self.accept(hk, self._toggle_ice)
+        for ck in ("c", "C"): self.accept(ck, lambda: self.puppet.trigger_celebration(duration=2.0, side="both"))
 
         self.accept("tab", lambda: self._set_mouse_lock(not self.mouse_locked))
         self.accept("escape", sys.exit)

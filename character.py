@@ -20,8 +20,19 @@ from physics_math import (
     ProceduralWeaponController,
     solve_two_bone_ik_3d,
     calculate_ballistica_arm_swing,
+    calculate_ballistica_arm_swing_anchors,
     calculate_ballistica_punch_momentum,
     calculate_ballistica_airborne_flail,
+    calculate_ballistica_airborne_arm_anchors,
+    calculate_ballistica_pickup_reach_anchors,
+    calculate_ballistica_punch_ik_anchors,
+    calculate_ballistica_shoulder_anchors,
+    calculate_ballistica_celebration_anchors,
+    calculate_ballistica_steered_movement_vector,
+    calculate_ballistica_torso_tilt_and_sway,
+    calculate_ballistica_airborne_legs,
+    calculate_ballistica_limb_stretch,
+    calculate_ballistica_throw_physics,
 )
 from props import make_sharp_box
 
@@ -61,6 +72,10 @@ class PuppetCharacter:
         self.head_hpr_spring  = SpringDamper3D((0.0, 0.0, 0.0), omega=SPRING_OMEGA_HEAD, zeta=SPRING_ZETA_HEAD)
         self.gun_recoil_spring = SpringDamper1D(0.0, omega=SPRING_OMEGA_WEAPON, zeta=SPRING_ZETA_WEAPON)
         self.gun_sway_spring  = SpringDamper3D((0.0, 0.0, 0.0), omega=SPRING_OMEGA_WEAPON, zeta=0.92)
+        self.arm_l_spring     = SpringDamper3D((0.0, 0.0, -10.0), omega=20.0, zeta=0.88)
+        self.arm_r_spring     = SpringDamper3D((0.0, 0.0, 10.0), omega=20.0, zeta=0.88)
+        self.elbow_l_spring   = SpringDamper1D(-14.0, omega=22.0, zeta=0.88)
+        self.elbow_r_spring   = SpringDamper1D(-14.0, omega=22.0, zeta=0.88)
 
         # Procedural Squash & Stretch + Terrain Slope Foot Alignment (Overgrowth Techniques)
         self.squash_system     = SquashStretchSystem(omega=24.0, zeta=0.68)
@@ -118,6 +133,54 @@ class PuppetCharacter:
         self.grenade_callback = None
         self.grenades_count   = 4
         self.grenade_cooldown = 0.0
+
+        # ── BALLISTICA FAITHFUL ARM-STATE EXTENSIONS ──
+        # Pickup reach animation (spaz_node.cc:2862-2885)
+        self.pickup_reach_timer  = 0.0          # counts down from 0.5 -> 0 during reach
+        self.pickup_swipe_timer  = 0.0          # 0..1 swipe-across progress
+
+        # Celebration arms (spaz_node.cc:2910-2933)
+        self.celebrate_left_timer  = 0.0
+        self.celebrate_right_timer = 0.0
+
+        # Shoulder breathing (spaz_node.cc:2690-2691)
+        self.shoulder_breath = 0.0              # sinusoidal breath value [-1, 1]
+
+        # Smoothed angular velocity for head/neck turn (spaz_node.cc:2058)
+        self.a_vel_y_smoothed_more = 0.0        # slower-smoothed avel for neck rotation
+
+        # Ballistica momentum steering & input derivatives (spaz_node.cc:1973-2046)
+        self.steered_dir_x     = 0.0
+        self.steered_dir_y     = 0.0
+        self.prev_input_x      = 0.0
+        self.prev_input_y      = 0.0
+        self.diff_smooth_x     = 0.0
+        self.diff_smooth_y     = 0.0
+        self.diff_smoother_x   = 0.0
+        self.diff_smoother_y   = 0.0
+
+        # Ballistica punch direction tracking (spaz_node.cc:3436-3447)
+        self.punch_dir_x       = 0.0
+        self.punch_dir_z       = 1.0
+
+        # Ballistica throw timer tracking (spaz_node.cc:1557)
+        self.last_pickup_time  = 0.0
+
+        # Ballistica dizzy & spin stun mechanic (spaz_node.cc:3169-3183)
+        self.dizzy_meter       = 0.0
+
+        # Ballistica idle head glancing (spaz_node.cc:3020-3052)
+        self.idle_glance_timer  = 2.0
+        self.idle_glance_target = Vec3(0, 0, 0)
+        self.idle_glance_hpr    = Vec3(0, 0, 0)
+
+        # Ballistica fall scream & airborne tracking (spaz_node.cc:3715-3755)
+        self.airborne_fall_time      = 0.0
+        self.has_screamed_this_fall = False
+
+        # Ballistica limb mesh dynamic elasticity
+        self.arm_stretch       = 1.0
+        self.leg_stretch       = 1.0
 
         self._build(start_pos)
 
@@ -528,6 +591,10 @@ class PuppetCharacter:
         fwd = self.get_forward_vector()
         search_point = torso_pos + fwd * 0.65
 
+        # Trigger Ballistica-faithful arm-reach gesture (spaz_node.cc:2862-2885)
+        self.pickup_reach_timer = 0.50
+        self.pickup_swipe_timer = 0.0
+
         closest_target = None
         closest_dist = PICKUP_RADIUS
 
@@ -555,12 +622,13 @@ class PuppetCharacter:
             else:
                 self.held_prop = closest_target
                 self.lift_progress = 0.0
+                self.last_pickup_time = self.anim_time
                 closest_target.set_held(True)
                 return ("prop", closest_target.name)
 
         return None
 
-    def throw_held_object(self):
+    def throw_held_object(self, is_bomb_reversed=False):
         if self.held_prop is None:
             return
         obj = self.held_prop
@@ -571,13 +639,22 @@ class PuppetCharacter:
             self.sfx_callback("throw")
 
         torso_pos = self.root_np.getPos()
-        cur_v = self.physics_body.getLinearVelocity()
         fwd = self.get_forward_vector()
 
-        fwd_speed = max(0.0, fwd.dot(cur_v))
-        launch_vel = fwd * (THROW_VELOCITY + fwd_speed * 0.6) + Vec3(0, 0, THROW_UP_VELOCITY)
+        # Ballistica throw power scaling & kickback impulse (spaz_node.cc:1543-1572, 3771-3850)
+        since_pickup_ms = (self.anim_time - self.last_pickup_time) * 1000.0
+        launch_vel, kickback = calculate_ballistica_throw_physics(
+            fwd_vec=fwd,
+            move_scale=self.run_gas,
+            since_pickup_ms=since_pickup_ms,
+            is_bomb_reversed=is_bomb_reversed,
+        )
+
         obj.set_pos(torso_pos + fwd * 0.45 + Vec3(0, 0, 0.65))
-        obj.set_linear_velocity(launch_vel)
+        obj.set_linear_velocity(Vec3(launch_vel[0], launch_vel[1], launch_vel[2]))
+
+        # Apply realistic Newton reaction kickback impulse to the thrower's torso (spaz_node.cc:3844-3846)
+        self.physics_body.applyCentralImpulse(Vec3(kickback[0], kickback[1], kickback[2]))
         self.throw_timer = 0.22
 
     def trigger_knockout(self, duration=1.5):
@@ -630,6 +707,18 @@ class PuppetCharacter:
             if self.held_prop:
                 self.throw_held_object()
 
+    def trigger_celebration(self, duration=1.5, side="both"):
+        """
+        Trigger Ballistica-faithful celebration: arms raised triumphantly.
+        side: 'left', 'right', or 'both'
+        (spaz_node.cc:2910-2933)
+        """
+        if side in ("left", "both"):
+            self.celebrate_left_timer = duration
+        if side in ("right", "both"):
+            self.celebrate_right_timer = duration
+
+
     def _orient_downward_joint(self, joint_np, target_world, origin_pos=None):
         p = origin_pos if origin_pos is not None else joint_np.getPos(self.render)
         self.ik_helper_np.setPos(p)
@@ -646,7 +735,10 @@ class PuppetCharacter:
         self.aim_target_3d = target_3d_point
 
         if self.knockout_timer > 0.0:
-            self.knockout_timer = max(0.0, self.knockout_timer - dt)
+            decay = dt if self.footing else dt * 0.5
+            self.knockout_timer = max(0.0, self.knockout_timer - decay)
+            self.balance = 0
+            self.blink_val = 1.0  # Eyes shut during knockout (spaz_node.cc:3126)
             self.torso_pivot.setHpr(0, 45.0, 30.0)
             self.arm_pivots["left"].setHpr(20, -20, -10)
             self.arm_pivots["right"].setHpr(-20, -20, 10)
@@ -662,6 +754,30 @@ class PuppetCharacter:
             self.gun_fire_timer = max(0.0, self.gun_fire_timer - dt)
         if self.grenade_cooldown > 0:
             self.grenade_cooldown = max(0.0, self.grenade_cooldown - dt)
+
+        # ── BALLISTICA FAITHFUL TIMER UPDATES ──
+        # Pickup arm-reach gesture timer (spaz_node.cc:2862-2885)
+        if self.pickup_reach_timer > 0:
+            self.pickup_reach_timer = max(0.0, self.pickup_reach_timer - dt)
+            # Swipe across in the second half of the reach
+            self.pickup_swipe_timer = 1.0 - (self.pickup_reach_timer / 0.50)
+
+        # Celebration arm timers
+        if self.celebrate_left_timer > 0:
+            self.celebrate_left_timer = max(0.0, self.celebrate_left_timer - dt)
+        if self.celebrate_right_timer > 0:
+            self.celebrate_right_timer = max(0.0, self.celebrate_right_timer - dt)
+
+        # Shoulder breathing update (spaz_node.cc:2338-2341)
+        is_still = (abs(world_mx) < 0.01 and abs(world_my) < 0.01)
+        if is_still:
+            self.shoulder_breath = math.sin(self.anim_time * 0.005 * 60.0)  # ~60hz equivalent
+        else:
+            self.shoulder_breath *= max(0.0, 1.0 - dt * 8.0)  # fade out when moving
+
+        # Slower-smoothed angular velocity for neck turn (spaz_node.cc:2057-2059)
+        avel = self.angular_vel_y
+        self.a_vel_y_smoothed_more = 0.92 * self.a_vel_y_smoothed_more + 0.08 * avel
 
         # Exact 2nd-order damped spring recoil decay
         self.gun_recoil_pitch = self.gun_recoil_spring.update(0.0, dt)
@@ -745,6 +861,75 @@ class PuppetCharacter:
         is_moving = (abs(world_mx) > 0.01 or abs(world_my) > 0.01)
         horiz_speed = math.hypot(cur_v.x, cur_v.y) if is_moving else 0.0
 
+        # Ballistica input derivative smoothing for sharp vs gentle direction changes (spaz_node.cc:2034-2046)
+        diff_x = world_mx - self.prev_input_x
+        diff_y = world_my - self.prev_input_y
+        self.diff_smooth_x = 0.93 * self.diff_smooth_x + 0.07 * diff_x
+        self.diff_smooth_y = 0.93 * self.diff_smooth_y + 0.07 * diff_y
+        self.diff_smoother_x = 0.983 * self.diff_smoother_x + 0.017 * diff_x
+        self.diff_smoother_y = 0.983 * self.diff_smoother_y + 0.017 * diff_y
+        self.prev_input_x, self.prev_input_y = world_mx, world_my
+
+        # Ballistica momentum steering: 90-degree vector rejection during high-speed runs (spaz_node.cc:1973-2028)
+        if is_moving and not self.is_holding_gun():
+            eff_mx, eff_my = calculate_ballistica_steered_movement_vector(
+                self.steered_dir_x, self.steered_dir_y,
+                world_mx, world_my,
+                self.run_gas, horiz_speed, dt
+            )
+            self.steered_dir_x, self.steered_dir_y = eff_mx, eff_my
+        else:
+            self.steered_dir_x, self.steered_dir_y = world_mx, world_my
+            eff_mx, eff_my = world_mx, world_my
+
+        # Ballistica continuous punch direction smoothing (spaz_node.cc:3436-3447)
+        if is_moving:
+            target_pdir_x = eff_mx
+            target_pdir_z = -eff_my
+        else:
+            fwd = self.get_forward_vector()
+            target_pdir_x = fwd.x
+            target_pdir_z = fwd.y
+        self.punch_dir_x = 0.5 * target_pdir_x + 0.5 * self.punch_dir_x
+        self.punch_dir_z = 0.5 * target_pdir_z + 0.5 * self.punch_dir_z
+        p_len = math.hypot(self.punch_dir_x, self.punch_dir_z)
+        if p_len > 0.001:
+            self.punch_dir_x /= p_len
+            self.punch_dir_z /= p_len
+
+        # Ballistica dizzy mechanic: spinning fast continuously knocks character out (spaz_node.cc:3169-3183)
+        if abs(self.angular_vel_y) > 7.5:
+            self.dizzy_meter += dt * 60.0
+            if self.dizzy_meter > 120.0:
+                self.dizzy_meter = 0.0
+                self.trigger_knockout(1.6)
+        else:
+            self.dizzy_meter = max(0.0, self.dizzy_meter - dt * 100.0)
+
+        # Ballistica fall scream when falling fast through air (spaz_node.cc:3715-3755)
+        if not self.footing:
+            self.airborne_fall_time += dt
+            if self.airborne_fall_time > 0.70 and cur_v.z < -10.0:
+                if self.sfx_callback and not self.has_screamed_this_fall:
+                    self.sfx_callback("stun")
+                    self.has_screamed_this_fall = True
+        else:
+            self.airborne_fall_time = 0.0
+            self.has_screamed_this_fall = False
+
+        # Ballistica idle head glancing (spaz_node.cc:3020-3052)
+        if is_moving or self.is_holding_gun() or not self.footing or self.punch_timer > 0:
+            self.idle_glance_target = Vec3(0, 0, 0)
+        else:
+            self.idle_glance_timer -= dt
+            if self.idle_glance_timer <= 0.0:
+                self.idle_glance_timer = random.uniform(1.2, 2.8)
+                if random.random() < 0.60:
+                    self.idle_glance_target = Vec3(random.uniform(-25.0, 25.0), random.uniform(-8.0, 6.0), 0)
+                else:
+                    self.idle_glance_target = Vec3(0, 0, 0)
+        self.idle_glance_hpr += (self.idle_glance_target - self.idle_glance_hpr) * min(1.0, dt * 6.0)
+
         speed_limit = SPRINT_SPEED if is_sprinting else MOVE_SPEED
         if self.held_prop:
             speed_limit *= 0.90
@@ -755,7 +940,6 @@ class PuppetCharacter:
         if not self.footing:
             self.run_gas = max(0.0, self.run_gas - dt * 2.0)
 
-
         if self.is_holding_gun():
             cur_h = self.root_np.getH()
             self.turn_diff = (cam_yaw - cur_h + 180.0) % 360.0 - 180.0
@@ -764,10 +948,10 @@ class PuppetCharacter:
             self.angular_vel_y = turn_w
             self.facing = cur_h
 
-            target_vx = world_mx * speed_limit
-            target_vy = world_my * speed_limit
+            target_vx = eff_mx * speed_limit
+            target_vy = eff_my * speed_limit
         elif is_moving:
-            target_deg = math.degrees(math.atan2(-world_mx, world_my))
+            target_deg = math.degrees(math.atan2(-eff_mx, eff_my))
             cur_h = self.root_np.getH()
             self.turn_diff = (target_deg - cur_h + 180.0) % 360.0 - 180.0
             turn_w = math.radians(self.turn_diff) * (8.0 if self.ice_mode else 16.0)
@@ -775,8 +959,8 @@ class PuppetCharacter:
             self.angular_vel_y = turn_w
             self.facing = cur_h
 
-            target_vx = world_mx * speed_limit
-            target_vy = world_my * speed_limit
+            target_vx = eff_mx * speed_limit
+            target_vy = eff_my * speed_limit
         else:
             self.turn_diff = 0.0
             self.angular_vel_y = 0.0
@@ -805,9 +989,7 @@ class PuppetCharacter:
 
         # Ballistica cyclical gait roll amount & momentum accumulator integration
         if self.footing and horiz_speed > 0.1:
-            self.roll_amt += horiz_speed * dt * 9.5
-            if self.roll_amt > 2.0 * math.pi:
-                self.roll_amt -= 2.0 * math.pi
+            self.roll_amt = self.gait_phase
         else:
             self.roll_amt *= max(0.0, 1.0 - dt * 4.0)
 
@@ -936,9 +1118,7 @@ class PuppetCharacter:
                 self.gait_phase += (speed / max(0.1, stride_len)) * dt * (2.0 * math.pi) * stride_mult
                 if self.gait_phase > 2.0 * math.pi:
                     self.gait_phase -= 2.0 * math.pi
-                    if is_sprinting and self.dust_callback and not self.ice_mode:
-                        t_pos = self.root_np.getPos()
-                        self.dust_callback((t_pos.x, t_pos.y, 0.02))
+                self.roll_amt = self.gait_phase
 
                 # Exact cycloidal displacement for left and right feet
                 l_x, l_z = cycloidal_step_displacement(self.gait_phase, stride_len, effective_step_height)
@@ -956,9 +1136,10 @@ class PuppetCharacter:
                 self.leg_pivots["right"].setHpr(0, foot_p, foot_r)
         else:
             self.gait_phase -= dt * 10.0
-            kick = math.sin(self.gait_phase) * 25.0
-            self.leg_pivots["left"].setHpr(0, kick, -8.0)
-            self.leg_pivots["right"].setHpr(0, -kick, 8.0)
+            # Ballistica counter-rotating leg flail when airborne (spaz_node.cc:2431-2457)
+            l_pitch, l_roll, r_pitch, r_roll = calculate_ballistica_airborne_legs(self.anim_time * 11.0)
+            self.leg_pivots["left"].setHpr(0, l_pitch, l_roll)
+            self.leg_pivots["right"].setHpr(0, r_pitch, r_roll)
 
         # ── INVERTED PENDULUM BIOMECHANICAL BANKING & ACCELERATION PITCH ──
         bank_roll = calculate_centrifugal_bank_angle(speed, self.angular_vel_y, abs(GRAVITY), BANK_MAX_DEG)
@@ -1013,8 +1194,30 @@ class PuppetCharacter:
                 gas  = self.run_gas
                 stride_phase = self.gait_phase
                 torso_bob   = abs(math.sin(stride_phase)) * (0.05 if is_sprinting else 0.04) * gas
-                torso_pitch = gas * (14.0 if is_sprinting else 9.0) + accel_pitch
-                torso_roll  = bank_roll - self.turn_diff * (0.35 if self.ice_mode else 0.20) * gas
+
+                # Ballistica acceleration tilt & gait roll sway (spaz_node.cc:3344-3378, 3449-3456)
+                fwd = self.get_forward_vector()
+                rgt = Vec3(fwd.y, -fwd.x, 0)
+                cur_v = self.physics_body.getLinearVelocity()
+                accel_fwd = self.forward_accel
+                accel_side = (Vec3(cur_v.x, cur_v.y, 0) - self.prev_planar_vel).dot(rgt) / max(0.001, dt)
+
+                b_tilt_p, b_tilt_r, b_stride_sway = calculate_ballistica_torso_tilt_and_sway(
+                    v_mag=speed,
+                    accel_fwd=accel_fwd,
+                    accel_side=accel_side,
+                    run_gas=gas,
+                    roll_amt=self.roll_amt,
+                    spin_rate=abs(self.angular_vel_y),
+                    is_holding=False,
+                    diff_smooth_side=self.diff_smooth_x,
+                    diff_smooth_fwd=self.diff_smooth_y,
+                    diff_smoother_side=self.diff_smoother_x,
+                    diff_smoother_fwd=self.diff_smoother_y,
+                )
+
+                torso_pitch = gas * (14.0 if is_sprinting else 9.0) + accel_pitch + b_tilt_p
+                torso_roll  = bank_roll - self.turn_diff * (0.35 if self.ice_mode else 0.20) * gas + b_tilt_r + b_stride_sway
                 target_torso_pos = Vec3(0, 0, torso_bob)
                 target_torso_hpr = Vec3(0, torso_pitch, torso_roll)
             else:
@@ -1062,151 +1265,317 @@ class PuppetCharacter:
             else:
                 breath = math.sin(self.anim_time * 3.5)
                 sway   = math.cos(self.anim_time * 1.8)
-                target_head_hpr = Vec3(sway * 2.0, -breath * 2.0 + self.head_jolt_pitch, 0)
+                # Ballistica natural idle glances around the environment (spaz_node.cc:3020-3052)
+                target_head_hpr = Vec3(
+                    sway * 2.0 + self.idle_glance_hpr.x,
+                    -breath * 2.0 + self.head_jolt_pitch + self.idle_glance_hpr.y,
+                    0
+                )
         else:
             target_head_hpr = Vec3(0, 15.0 + self.head_jolt_pitch, 0)
+
+        # ── BALLISTICA HEAD/NECK TURN FROM ANGULAR VELOCITY (spaz_node.cc:3013-3016) ──
+        # When moving, head rotates slightly opposite to the turn direction:
+        #   neck_angle = clamp(-1, 1, a_vel_y_smoothed_more * -0.14)
+        neck_turn_yaw = max(-1.0, min(1.0, self.a_vel_y_smoothed_more * -0.14))
+        neck_turn_deg = math.degrees(neck_turn_yaw)  # already in radians-ish, convert
+        if speed > 0.1 or abs(self.angular_vel_y) > 0.2:
+            target_head_hpr = Vec3(
+                target_head_hpr.x + neck_turn_deg,
+                target_head_hpr.y,
+                target_head_hpr.z,
+            )
 
         smoothed_head_hpr = self.head_hpr_spring.update(target_head_hpr, dt)
         self.head_pivot.setHpr(smoothed_head_hpr)
 
+
         # ── CLOSED-FORM 3D TWO-BONE INVERSE KINEMATICS & ARM LAYERED ACTIONS ──
+
+        # Compute breathing and shoulder anchors (spaz_node.cc:2669-2699)
+        is_punching = (self.punch_timer > 0.0)
+        r_shoulder_local, l_shoulder_local = calculate_ballistica_shoulder_anchors(
+            breath       = self.shoulder_breath,
+            punching     = is_punching,
+            punch_right  = self.punch_right,
+        )
+
+        fwd = self.get_forward_vector()
+        rgt = Vec3(fwd.y, -fwd.x, 0)
+        up  = Vec3(0, 0, 1)
+        torso_pos = self.root_np.getPos()
+
+        # Helper: convert Ballistica torso-local (x,y,z) anchor to world-space Point3.
+        # Ballistica coordinate system:
+        #   anchor_x: lateral offset (+Left, -Right)
+        #   anchor_y: vertical offset (+Up, -Down)
+        #   anchor_z: longitudinal offset (+Forward, -Backward)
+        def torso_local_to_world(anchor_x, anchor_y, anchor_z):
+            """Convert Ballistica torso-local anchor offset to world-space Point3."""
+            return Point3(
+                torso_pos.x - rgt.x * anchor_x + fwd.x * anchor_z + up.x * anchor_y,
+                torso_pos.y - rgt.y * anchor_x + fwd.y * anchor_z + up.y * anchor_y,
+                torso_pos.z - rgt.z * anchor_x + fwd.z * anchor_z + up.z * anchor_y,
+            )
+
+        # ── SHOULDER SOCKET WORLD POSITIONS ──
+        r_sh_world = self.arm_pivots["right"].getPos(self.render)
+        l_sh_world = self.arm_pivots["left"].getPos(self.render)
+
         if self.is_holding_gun():
+            # ── WEAPON IK: Firing grip + support guard (unchanged, already correct) ──
             active_gun = self.get_active_gun()
             if active_gun and hasattr(active_gun, "grip_socket") and hasattr(active_gun, "guard_socket"):
                 L1 = self.arm_l1
                 L2 = self.arm_l2
-                fwd = self.get_forward_vector()
-                rgt = Vec3(fwd.y, -fwd.x, 0)
-                up  = Vec3(0, 0, 1)
 
                 # Right Arm: Firing hand locks to weapon grip socket
-                r_sh_pos = self.arm_pivots["right"].getPos(self.render)
                 r_target = active_gun.grip_socket.getPos(self.render)
                 r_pole   = rgt * 0.85 - up * 0.50 - fwd * 0.15  # Outward flared combat elbow
-                r_elbow  = solve_two_bone_ik_3d(r_sh_pos, r_target, L1, L2, r_pole)
-                self._orient_downward_joint(self.arm_pivots["right"], r_elbow, r_sh_pos)
+                r_elbow  = solve_two_bone_ik_3d(r_sh_world, r_target, L1, L2, r_pole)
+                self._orient_downward_joint(self.arm_pivots["right"], r_elbow, r_sh_world)
                 self._orient_downward_joint(self.elbow_pivots["right"], r_target, r_elbow)
 
                 # Left Arm: Support hand locks to handguard / forend socket
-                l_sh_pos = self.arm_pivots["left"].getPos(self.render)
                 l_target = active_gun.guard_socket.getPos(self.render)
                 l_pole   = -rgt * 0.35 + fwd * 0.40 - up * 0.85  # Tucked tactical support elbow
-                l_elbow  = solve_two_bone_ik_3d(l_sh_pos, l_target, L1, L2, l_pole)
-                self._orient_downward_joint(self.arm_pivots["left"], l_elbow, l_sh_pos)
+                l_elbow  = solve_two_bone_ik_3d(l_sh_world, l_target, L1, L2, l_pole)
+                self._orient_downward_joint(self.arm_pivots["left"], l_elbow, l_sh_world)
                 self._orient_downward_joint(self.elbow_pivots["left"], l_target, l_elbow)
 
         elif self.held_prop:
-            # ── BALLISTICA TWO-HANDED PROP CARRY IK (spaz_node.cc / prop_node.cc) ──
+            # ── BALLISTICA TWO-HANDED PROP CARRY IK (spaz_node.cc:2715-2755) ──
+            # Ballistica sets stiffness=40, damping=1 for held-prop hands
             p_crate = self.held_prop.get_pos()
-            fwd = self.get_forward_vector()
-            rgt = Vec3(fwd.y, -fwd.x, 0)
-            up  = Vec3(0, 0, 1)
 
-            # Ballistica grip targets: prop +/- right * 0.15 - up * 0.04 + fwd * 0.02
+            # Ballistica grip offsets relative to held-body: ±right * 0.15 - up * 0.04 + fwd * 0.02
             crate_left  = p_crate - rgt * 0.15 - up * 0.04 + fwd * 0.02
             crate_right = p_crate + rgt * 0.15 - up * 0.04 + fwd * 0.02
 
             L1 = self.arm_l1
             L2 = self.arm_l2
 
-            l_sh_pos = self.arm_pivots["left"].getPos(self.render)
-            l_pole = -rgt * 0.85 - up * 0.35 + fwd * 0.20
-            l_elbow = solve_two_bone_ik_3d(l_sh_pos, crate_left, L1, L2, l_pole)
-            self._orient_downward_joint(self.arm_pivots["left"], l_elbow, l_sh_pos)
+            # Left hand
+            l_pole  = -rgt * 0.85 - up * 0.35 + fwd * 0.20
+            l_elbow = solve_two_bone_ik_3d(l_sh_world, crate_left, L1, L2, l_pole)
+            self._orient_downward_joint(self.arm_pivots["left"], l_elbow, l_sh_world)
             self._orient_downward_joint(self.elbow_pivots["left"], crate_left, l_elbow)
 
-            r_sh_pos = self.arm_pivots["right"].getPos(self.render)
-            r_pole = rgt * 0.85 - up * 0.35 + fwd * 0.20
-            r_elbow = solve_two_bone_ik_3d(r_sh_pos, crate_right, L1, L2, r_pole)
-            self._orient_downward_joint(self.arm_pivots["right"], r_elbow, r_sh_pos)
+            # Right hand
+            r_pole  = rgt * 0.85 - up * 0.35 + fwd * 0.20
+            r_elbow = solve_two_bone_ik_3d(r_sh_world, crate_right, L1, L2, r_pole)
+            self._orient_downward_joint(self.arm_pivots["right"], r_elbow, r_sh_world)
             self._orient_downward_joint(self.elbow_pivots["right"], crate_right, r_elbow)
 
         elif self.punch_timer > 0.0:
-            # ── 3-PHASE MARTIAL ARTS COMBO CROSS / JAB ──
+            # ── 3-PHASE BALLISTICA PUNCH IK (spaz_node.cc:2761-2819) ──
             elapsed_ms = (PUNCH_DURATION - self.punch_timer) * 1000.0
-            mirror = 1.0 if self.punch_right else -1.0
 
             if self.is_spin_punch:
+                # Wide windmill stance for spin punch
                 self.arm_pivots["left"].setHpr(0, -60.0, -45.0)
                 self.elbow_pivots["left"].setHpr(0, -20.0, 0)
                 self.arm_pivots["right"].setHpr(0, -60.0, 45.0)
                 self.elbow_pivots["right"].setHpr(0, -20.0, 0)
             else:
-                if elapsed_ms < 65.0:
-                    prog = elapsed_ms / 65.0
-                    punch_pitch = -25.0 * prog
-                    punch_roll  = 12.0 * prog * mirror
-                    elbow_bend  = -75.0 * prog
-                    opp_pitch   = -35.0 * prog
-                    opp_roll    = -15.0 * prog * mirror
-                    opp_elbow   = -65.0 * prog
-                elif elapsed_ms < 145.0:
-                    prog = (elapsed_ms - 65.0) / 80.0
-                    thrust = math.sin(prog * math.pi * 0.5)
-                    punch_pitch = -25.0 - thrust * 62.0
-                    punch_roll  = (12.0 + thrust * 18.0) * mirror
-                    elbow_bend  = -75.0 * (1.0 - thrust)
-                    opp_pitch   = -35.0
-                    opp_roll    = -15.0 * mirror
-                    opp_elbow   = -65.0
+                # Get shoulder local coords for strike direction
+                if self.punch_right:
+                    sh_loc = r_shoulder_local
                 else:
-                    prog = (elapsed_ms - 145.0) / 135.0
-                    ret_s = 1.0 - prog
-                    punch_pitch = -87.0 * ret_s
-                    punch_roll  = 30.0 * ret_s * mirror
-                    elbow_bend  = -20.0 * (1.0 - ret_s)
-                    opp_pitch   = -35.0 * ret_s
-                    opp_roll    = -15.0 * ret_s * mirror
-                    opp_elbow   = -65.0 * ret_s - 15.0 * (1.0 - ret_s)
+                    sh_loc = l_shoulder_local
+
+                # Ballistica continuous punch direction from smoothed punch vector (spaz_node.cc:3436-3447)
+                p_dir_x = self.punch_dir_x
+                p_dir_z = self.punch_dir_z
+
+                punch_xyz, opp_xyz, p_stiff, p_damp, o_stiff, o_damp = (
+                    calculate_ballistica_punch_ik_anchors(
+                        elapsed_ms     = elapsed_ms,
+                        punch_right    = self.punch_right,
+                        punch_dir_x    = p_dir_x,
+                        punch_dir_z    = p_dir_z,
+                        shoulder_local_x = sh_loc[0],
+                        shoulder_local_y = sh_loc[1],
+                        shoulder_local_z = sh_loc[2],
+                    )
+                )
+
+                L1 = self.arm_l1
+                L2 = self.arm_l2
+
+                # Opposite hand: guard position (always active during punch)
+                opp_target = torso_local_to_world(opp_xyz[0], opp_xyz[1], opp_xyz[2])
 
                 if self.punch_right:
-                    self.arm_pivots["right"].setHpr(0, punch_pitch, punch_roll)
-                    self.elbow_pivots["right"].setHpr(0, elbow_bend, 0)
-                    self.arm_pivots["left"].setHpr(0, opp_pitch, opp_roll)
-                    self.elbow_pivots["left"].setHpr(0, opp_elbow, 0)
+                    # Opposite = left hand guard
+                    l_pole  = -rgt * 0.50 - up * 0.40
+                    l_elbow = solve_two_bone_ik_3d(l_sh_world, opp_target, L1, L2, l_pole)
+                    self._orient_downward_joint(self.arm_pivots["left"], l_elbow, l_sh_world)
+                    self._orient_downward_joint(self.elbow_pivots["left"], opp_target, l_elbow)
+
+                    if punch_xyz is not None:
+                        # Active punch strike/anticipation with dynamic Ballistica limb elasticity (spaz_node.cc:4275-4306)
+                        p_target = torso_local_to_world(punch_xyz[0], punch_xyz[1], punch_xyz[2])
+                        reach_dist = (p_target - r_sh_world).length()
+                        stretch = calculate_ballistica_limb_stretch(reach_dist, rest_dist=L1 + L2, max_stretch=1.25)
+                        eff_l1 = L1 * stretch
+                        eff_l2 = L2 * stretch
+                        r_pole   = rgt * 0.85 - up * 0.30
+                        r_elbow  = solve_two_bone_ik_3d(r_sh_world, p_target, eff_l1, eff_l2, r_pole)
+                        self._orient_downward_joint(self.arm_pivots["right"], r_elbow, r_sh_world)
+                        self._orient_downward_joint(self.elbow_pivots["right"], p_target, r_elbow)
+                    else:
+                        # Recovery: use running arm swing
+                        (l_p, l_r, l_elb), (r_p, r_r, r_elb) = calculate_ballistica_arm_swing(self.roll_amt, self.run_gas)
+                        self.arm_pivots["right"].setHpr(0, r_p, r_r)
+                        self.elbow_pivots["right"].setHpr(0, r_elb, 0)
                 else:
-                    self.arm_pivots["left"].setHpr(0, punch_pitch, punch_roll)
-                    self.elbow_pivots["left"].setHpr(0, elbow_bend, 0)
-                    self.arm_pivots["right"].setHpr(0, opp_pitch, opp_roll)
-                    self.elbow_pivots["right"].setHpr(0, opp_elbow, 0)
+                    # Opposite = right hand guard
+                    r_pole  = rgt * 0.50 - up * 0.40
+                    r_elbow = solve_two_bone_ik_3d(r_sh_world, opp_target, L1, L2, r_pole)
+                    self._orient_downward_joint(self.arm_pivots["right"], r_elbow, r_sh_world)
+                    self._orient_downward_joint(self.elbow_pivots["right"], opp_target, r_elbow)
+
+                    if punch_xyz is not None:
+                        p_target = torso_local_to_world(punch_xyz[0], punch_xyz[1], punch_xyz[2])
+                        reach_dist = (p_target - l_sh_world).length()
+                        stretch = calculate_ballistica_limb_stretch(reach_dist, rest_dist=L1 + L2, max_stretch=1.25)
+                        eff_l1 = L1 * stretch
+                        eff_l2 = L2 * stretch
+                        l_pole   = -rgt * 0.85 - up * 0.30
+                        l_elbow  = solve_two_bone_ik_3d(l_sh_world, p_target, eff_l1, eff_l2, l_pole)
+                        self._orient_downward_joint(self.arm_pivots["left"], l_elbow, l_sh_world)
+                        self._orient_downward_joint(self.elbow_pivots["left"], p_target, l_elbow)
+                    else:
+                        # Recovery: use running arm swing
+                        (l_p, l_r, l_elb), (r_p, r_r, r_elb) = calculate_ballistica_arm_swing(self.roll_amt, self.run_gas)
+                        self.arm_pivots["left"].setHpr(0, l_p, l_r)
+                        self.elbow_pivots["left"].setHpr(0, l_elb, 0)
+
+        elif self.pickup_reach_timer > 0.0 and not self.held_prop:
+            # ── BALLISTICA PICKUP REACH GESTURE (spaz_node.cc:2862-2885) ──
+            l_xyz, r_xyz, stiff, damp = calculate_ballistica_pickup_reach_anchors(self.pickup_swipe_timer)
+
+            L1 = self.arm_l1
+            L2 = self.arm_l2
+
+            l_target = torso_local_to_world(l_xyz[0], l_xyz[1], l_xyz[2])
+            l_pole   = -rgt * 0.30 + fwd * 0.40 - up * 0.50
+            l_elbow  = solve_two_bone_ik_3d(l_sh_world, l_target, L1, L2, l_pole)
+            self._orient_downward_joint(self.arm_pivots["left"], l_elbow, l_sh_world)
+            self._orient_downward_joint(self.elbow_pivots["left"], l_target, l_elbow)
+
+            r_target = torso_local_to_world(r_xyz[0], r_xyz[1], r_xyz[2])
+            r_pole   = rgt * 0.30 + fwd * 0.40 - up * 0.50
+            r_elbow  = solve_two_bone_ik_3d(r_sh_world, r_target, L1, L2, r_pole)
+            self._orient_downward_joint(self.arm_pivots["right"], r_elbow, r_sh_world)
+            self._orient_downward_joint(self.elbow_pivots["right"], r_target, r_elbow)
 
         elif self.throw_timer > 0.0:
-            # ── 2-PHASE PHYSICAL HEAVE THROW ──
+            # ── 2-PHASE PHYSICAL HEAVE THROW (spaz_node.cc:2820-2836) ──
             throw_prog = 1.0 - (self.throw_timer / 0.22)
             if throw_prog < 0.25:
                 snap_pitch = -20.0 - (throw_prog / 0.25) * 15.0
-                el_pitch = -70.0
+                el_pitch   = -70.0
             else:
-                thrust = math.sin(((throw_prog - 0.25) / 0.75) * math.pi * 0.5)
+                thrust     = math.sin(((throw_prog - 0.25) / 0.75) * math.pi * 0.5)
                 snap_pitch = -35.0 - thrust * 55.0
-                el_pitch = -70.0 * (1.0 - thrust)
+                el_pitch   = -70.0 * (1.0 - thrust)
 
             self.arm_pivots["left"].setHpr(0, snap_pitch, -12.0)
             self.elbow_pivots["left"].setHpr(0, el_pitch, 0)
             self.arm_pivots["right"].setHpr(0, snap_pitch, 12.0)
             self.elbow_pivots["right"].setHpr(0, el_pitch, 0)
 
+        elif (self.celebrate_left_timer > 0.0 or self.celebrate_right_timer > 0.0):
+            # ── BALLISTICA CELEBRATION ARMS RAISED (spaz_node.cc:2910-2933) ──
+            l_xyz, r_xyz, stiff, damp = calculate_ballistica_celebration_anchors(
+                anim_time          = self.anim_time,
+                celebrating_left   = self.celebrate_left_timer > 0.0,
+                celebrating_right  = self.celebrate_right_timer > 0.0,
+            )
+            L1 = self.arm_l1
+            L2 = self.arm_l2
+
+            if l_xyz:
+                l_target = torso_local_to_world(l_xyz[0], l_xyz[1], l_xyz[2])
+                l_pole   = -rgt * 0.20 + up * 0.60
+                l_elbow  = solve_two_bone_ik_3d(l_sh_world, l_target, L1, L2, l_pole)
+                self._orient_downward_joint(self.arm_pivots["left"], l_elbow, l_sh_world)
+                self._orient_downward_joint(self.elbow_pivots["left"], l_target, l_elbow)
+            if r_xyz:
+                r_target = torso_local_to_world(r_xyz[0], r_xyz[1], r_xyz[2])
+                r_pole   = rgt * 0.20 + up * 0.60
+                r_elbow  = solve_two_bone_ik_3d(r_sh_world, r_target, L1, L2, r_pole)
+                self._orient_downward_joint(self.arm_pivots["right"], r_elbow, r_sh_world)
+                self._orient_downward_joint(self.elbow_pivots["right"], r_target, r_elbow)
+
         elif self.footing:
-            if speed > 0.3:
-                # Ballistica Quadrature Elliptical Arm Swing (spaz_node.cc:2935-2972)
-                (l_p, l_r, l_elb), (r_p, r_r, r_elb) = calculate_ballistica_arm_swing(self.roll_amt, self.run_gas)
-                self.arm_pivots["left"].setHpr(0, l_p, l_r)
-                self.elbow_pivots["left"].setHpr(0, l_elb, 0)
-                self.arm_pivots["right"].setHpr(0, r_p, r_r)
-                self.elbow_pivots["right"].setHpr(0, r_elb, 0)
-            else:
-                breath = math.sin(self.anim_time * 3.6)
-                self.arm_pivots["left"].setHpr(0, breath * 2.5, -10.0)
-                self.elbow_pivots["left"].setHpr(0, -14.0, 0)
-                self.arm_pivots["right"].setHpr(0, -breath * 2.5, 10.0)
-                self.elbow_pivots["right"].setHpr(0, -14.0, 0)
+            # ── BALLISTICA RUNNING & WALKING ARM SWING (spaz_node.cc:2935-2978) ──
+            # Smooth forward kinematics with exact Ballistica quadrature arm angles,
+            # continuous velocity blending, and 2nd-order spring-damper inertia.
+            (l_p, l_r, l_elb), (r_p, r_r, r_elb) = calculate_ballistica_arm_swing(
+                self.roll_amt, self.run_gas
+            )
+
+            # Idle breathing sway (when stationary or near-stop)
+            breath_arm = math.sin(self.anim_time * 3.6)
+            idle_l_p = breath_arm * 2.5
+            idle_r_p = -breath_arm * 2.5
+            idle_l_r = -10.0
+            idle_r_r = 10.0
+            idle_elb = -14.0
+
+            # Smooth speed blend from idle (0.0) to full walking/running swing (0.5)
+            move_blend = min(1.0, max(0.0, speed / 0.5))
+
+            target_l_p = (1.0 - move_blend) * idle_l_p + move_blend * l_p
+            target_r_p = (1.0 - move_blend) * idle_r_p + move_blend * r_p
+            target_l_r = (1.0 - move_blend) * idle_l_r + move_blend * l_r
+            target_r_r = (1.0 - move_blend) * idle_r_r + move_blend * r_r
+            target_l_elb = (1.0 - move_blend) * idle_elb + move_blend * l_elb
+            target_r_elb = (1.0 - move_blend) * idle_elb + move_blend * r_elb
+
+            smoothed_l_hpr = self.arm_l_spring.update(Vec3(0, target_l_p, target_l_r), dt)
+            smoothed_r_hpr = self.arm_r_spring.update(Vec3(0, target_r_p, target_r_r), dt)
+            smoothed_l_elb = self.elbow_l_spring.update(target_l_elb, dt)
+            smoothed_r_elb = self.elbow_r_spring.update(target_r_elb, dt)
+
+            self.arm_pivots["left"].setHpr(smoothed_l_hpr)
+            self.elbow_pivots["left"].setHpr(0, smoothed_l_elb, 0)
+            self.arm_pivots["right"].setHpr(smoothed_r_hpr)
+            self.elbow_pivots["right"].setHpr(0, smoothed_r_elb, 0)
         else:
-            # Ballistica Airborne Counter-Rotating Flail Kinematics (spaz_node.cc:2838-2859)
-            l_arm, l_elb, r_arm, r_elb = calculate_ballistica_airborne_flail(self.anim_time)
-            self.arm_pivots["left"].setHpr(l_arm[0], l_arm[1], l_arm[2])
-            self.elbow_pivots["left"].setHpr(l_elb[0], l_elb[1], l_elb[2])
-            self.arm_pivots["right"].setHpr(r_arm[0], r_arm[1], r_arm[2])
-            self.elbow_pivots["right"].setHpr(r_elb[0], r_elb[1], r_elb[2])
+            # ── BALLISTICA AIRBORNE ARM FLAIL with world-space IK anchors (spaz_node.cc:2837-2858) ──
+            l_xyz, r_xyz, stiff, damp = calculate_ballistica_airborne_arm_anchors(self.anim_time)
+
+            L1 = self.arm_l1
+            L2 = self.arm_l2
+
+            l_target = torso_local_to_world(l_xyz[0], l_xyz[1], l_xyz[2])
+            l_pole   = -rgt * 0.50 + up * 0.30 + fwd * 0.20
+            l_elbow  = solve_two_bone_ik_3d(l_sh_world, l_target, L1, L2, l_pole)
+            self._orient_downward_joint(self.arm_pivots["left"], l_elbow, l_sh_world)
+            self._orient_downward_joint(self.elbow_pivots["left"], l_target, l_elbow)
+
+            r_target = torso_local_to_world(r_xyz[0], r_xyz[1], r_xyz[2])
+            r_pole   = rgt * 0.50 + up * 0.30 + fwd * 0.20
+            r_elbow  = solve_two_bone_ik_3d(r_sh_world, r_target, L1, L2, r_pole)
+            self._orient_downward_joint(self.arm_pivots["right"], r_elbow, r_sh_world)
+            self._orient_downward_joint(self.elbow_pivots["right"], r_target, r_elbow)
+
+        # Synchronize arm spring states when IK overrides are active so transitions back are seamless
+        if self.is_holding_gun() or self.held_prop or self.punch_timer > 0.0 or (self.pickup_reach_timer > 0.0 and not self.held_prop) or self.throw_timer > 0.0 or (self.celebrate_left_timer > 0.0 or self.celebrate_right_timer > 0.0) or not self.footing:
+            cur_l = self.arm_pivots["left"].getHpr()
+            cur_r = self.arm_pivots["right"].getHpr()
+            self.arm_l_spring.current = Vec3(0, cur_l.y, cur_l.z)
+            self.arm_r_spring.current = Vec3(0, cur_r.y, cur_r.z)
+            self.elbow_l_spring.current = self.elbow_pivots["left"].getP()
+            self.elbow_r_spring.current = self.elbow_pivots["right"].getP()
+            self.arm_l_spring.velocity = Vec3(0, 0, 0)
+            self.arm_r_spring.velocity = Vec3(0, 0, 0)
+            self.elbow_l_spring.velocity = 0.0
+            self.elbow_r_spring.velocity = 0.0
 
 
     def get_torso_pos(self):

@@ -591,3 +591,371 @@ def calculate_ballistica_airborne_flail(anim_time):
 
     return l_arm, l_elbow, r_arm, r_elbow
 
+
+def calculate_ballistica_arm_swing_anchors(roll_amt, run_gas, is_female=False):
+    """
+    Computes Ballistica's exact torso-local IK hand anchor targets for arm swing
+    during walking and running (spaz_node.cc:2935-2971).
+
+    Unlike the angle-based calculate_ballistica_arm_swing(), this returns raw
+    torso-local (x, y, z) hand target positions that can be directly used as
+    IK anchor targets in world-space IK solvers, matching how Ballistica's
+    JointFixedEF anchor1 is set directly.
+
+    Ballistica coordinate system (torso-local):
+        x: left(+) to right(-)
+        y: back(-) to front(+) / vertical
+        z: down(-) to up(+)
+
+    Returns:
+        (l_xyz, r_xyz, linear_stiffness, linear_damping)
+    """
+    blend = run_gas * run_gas
+    inv_blend = 1.0 - run_gas
+
+    v1run = math.sin(roll_amt + math.pi * 0.5) * 0.20
+    v2run = math.cos(roll_amt) * 0.30
+    v1    = math.sin(roll_amt) * 0.05
+    v2    = math.cos(roll_amt) * (0.30 if is_female else 0.60)
+
+    # Fixed lateral offset +-0.2 exactly as Ballistica (spaz_node.cc:2960, 2967)
+    l_x =  0.20
+    r_x = -0.20
+
+    l_y = (-v1run - 0.15) * blend + (-v1 - 0.10) * inv_blend
+    l_z = (-v2run + 0.15) * blend + (-v2 + 0.10) * inv_blend
+
+    r_y = ( v1run - 0.15) * blend + ( v1 - 0.10) * inv_blend
+    r_z = ( v2run + 0.15) * blend + ( v2 + 0.10) * inv_blend
+
+    # Ballistica joint stiffness blend (spaz_node.cc:2943-2951)
+    lin_stiffness = 14.0 * blend + 0.5 * inv_blend
+    lin_damping   =  0.08 * blend + 0.001 * inv_blend
+
+    return (l_x, l_y, l_z), (r_x, r_y, r_z), lin_stiffness, lin_damping
+
+
+def calculate_ballistica_airborne_arm_anchors(anim_time):
+    """
+    Computes Ballistica's exact torso-local hand anchor targets when airborne
+    with zero balance (spaz_node.cc:2837-2858).
+
+    Ballistica uses: wave_amt = scenetime_ms * -0.018
+    At 60 fps this is equivalent to anim_time * -11.0 * (1000/60) ~ -11.0 rad/s
+
+        v1 = sin(wave_amt) * 0.34
+        v2 = cos(wave_amt) * 0.34
+        left  = [+0.4,  v1+0.6,  v2+0.2]
+        right = [-0.4, -v1+0.6, -v2+0.2]
+
+    Returns:
+        (l_xyz, r_xyz, linear_stiffness, linear_damping)
+    """
+    wave_amt = anim_time * -11.0
+    v1 = math.sin(wave_amt) * 0.34
+    v2 = math.cos(wave_amt) * 0.34
+
+    l_xyz = ( 0.40,  v1 + 0.60,  v2 + 0.20)
+    r_xyz = (-0.40, -v1 + 0.60, -v2 + 0.20)
+
+    return l_xyz, r_xyz, 6.0, 0.01
+
+
+def calculate_ballistica_pickup_reach_anchors(swipe_progress):
+    """
+    Computes Ballistica's hand anchor targets while reaching to pick up an object
+    (spaz_node.cc:2862-2885).
+
+    Args:
+        swipe_progress: float 0->1 representing the reach/swipe animation phase.
+            0.0 to 0.5: arms reach forward
+            0.5 to 1.0: arms swipe across (inward) to grab
+
+    Returns:
+        (l_xyz, r_xyz, linear_stiffness, linear_damping)
+    """
+    if swipe_progress < 0.5:
+        l_xyz = ( 0.40, 0.50, 0.70)
+        r_xyz = (-0.40, 0.20, 0.70)
+    else:
+        l_xyz = (-0.10, 0.50, 0.70)
+        r_xyz = ( 0.10, 0.20, 0.70)
+
+    return l_xyz, r_xyz, 6.0, 0.10
+
+
+def calculate_ballistica_punch_ik_anchors(elapsed_ms, punch_right,
+                                           punch_dir_x, punch_dir_z,
+                                           shoulder_local_x, shoulder_local_y, shoulder_local_z):
+    """
+    Computes Ballistica's 3-phase punch hand IK anchor targets in torso-local space
+    (spaz_node.cc:2761-2819).
+
+    Phase 1 - Anticipation (0-80ms):
+        Punch hand draws back away from target
+        Opposite hand pulls back to guard position
+
+    Phase 2 - Strike (80-200ms):
+        Punch hand drives toward shoulder + punch_dir * 0.7 in world space
+        This function pre-applies the offset in torso-local space
+
+    Phase 3 - Recovery (200ms+):
+        Returns None for punch_xyz to indicate free hang
+
+    Returns:
+        (punch_xyz, opposite_xyz, punch_stiffness, punch_damping, opp_stiffness, opp_damping)
+        punch_xyz = None in recovery phase (caller should use arm-swing IK instead)
+    """
+    mirror = -1.0 if punch_right else 1.0
+
+    opp_xyz       = (-0.20 * mirror, 0.10, 0.0)
+    opp_stiffness = 30.0
+    opp_damping   = 0.10
+
+    if elapsed_ms < 80.0:
+        # Anticipation: draw back
+        punch_xyz       = (0.40 * mirror, 0.0, -0.10)
+        punch_stiffness = 100.0
+        punch_damping   = 1.0
+    elif elapsed_ms < 200.0:
+        # Strike: extend toward target. Ballistica gets world-pos of shoulder
+        # then offsets by punch_dir * 0.7 and converts back to torso space.
+        # We approximate that in torso-local using the pre-computed shoulder offset.
+        wx = shoulder_local_x + punch_dir_x * 0.70
+        wy = shoulder_local_y + 0.13
+        wz = shoulder_local_z + punch_dir_z * 0.70
+        punch_xyz       = (wx, wy, wz)
+        punch_stiffness = 100.0
+        punch_damping   = 1.0
+    else:
+        punch_xyz       = None
+        punch_stiffness = 0.0
+        punch_damping   = 0.0
+
+    return punch_xyz, opp_xyz, punch_stiffness, punch_damping, opp_stiffness, opp_damping
+
+
+def calculate_ballistica_shoulder_anchors(breath, punching, punch_right,
+                                           shoulder_offset=(0.0, 0.0, 0.0)):
+    """
+    Computes Ballistica's torso-local shoulder socket anchor positions (spaz_node.cc:2669-2699).
+
+    Includes:
+    - Anatomical base position
+    - Breathing-driven Y offset
+    - Punch lean: slight Z shift of both shoulders toward the punch side
+
+    Base (Ballistica): x=-0.15, y=0.14, z=0.0
+
+    Returns:
+        (right_shoulder_xyz, left_shoulder_xyz)
+    """
+    bx = -0.15 + shoulder_offset[0]
+    by =  0.14 + shoulder_offset[1] + breath * 0.012
+    bz =  0.00 + shoulder_offset[2]
+
+    l_z_off = 0.0
+    r_z_off = 0.0
+    if punching:
+        if punch_right:
+            l_z_off = -0.05
+            r_z_off =  0.05
+        else:
+            l_z_off =  0.05
+            r_z_off = -0.05
+
+    right_shoulder = ( bx, by, bz + r_z_off)
+    left_shoulder  = (-bx, by, bz + l_z_off)
+
+    return right_shoulder, left_shoulder
+
+
+def calculate_ballistica_celebration_anchors(anim_time, celebrating_left, celebrating_right):
+    """
+    Computes Ballistica's celebration arm anchor targets: arms raised triumphantly
+    (spaz_node.cc:2910-2933).
+
+    Args:
+        anim_time: current animation time in seconds
+        celebrating_left:  bool - left arm should be raised
+        celebrating_right: bool - right arm should be raised
+
+    Returns:
+        (l_xyz or None, r_xyz or None, stiffness, damping)
+    """
+    v1 = math.sin(anim_time * 0.04) * 0.1
+    v2 = math.cos(anim_time * 0.03) * 0.1
+
+    l_xyz = ( 0.40 + v2, 0.50, 0.20 + v1) if celebrating_left  else None
+    r_xyz = (-0.40 - v2, 0.50, 0.20 + v1) if celebrating_right else None
+
+    return l_xyz, r_xyz, 30.0, 0.08
+
+
+def calculate_ballistica_steered_movement_vector(
+    cur_dir_x, cur_dir_y, new_input_x, new_input_y, run_gas, current_speed, dt=1.0/60.0
+):
+    """
+    Ballistica's momentum-preserving steering filter (spaz_node.cc:1973-2028).
+    When running (run_gas > 0.05), strips out any component >90 deg off current heading,
+    forcing smooth curved turns. Blends direction with speed-dependent inertia.
+
+    Returns:
+        (out_dir_x, out_dir_y)
+    """
+    input_len = math.hypot(new_input_x, new_input_y)
+    if input_len < 0.001:
+        return 0.0, 0.0
+
+    in_x = new_input_x / input_len
+    in_y = new_input_y / input_len
+
+    cur_len = math.hypot(cur_dir_x, cur_dir_y)
+    if cur_len < 0.001 or run_gas < 0.05:
+        return in_x * input_len, in_y * input_len
+
+    c_x = cur_dir_x / cur_len
+    c_y = cur_dir_y / cur_len
+
+    # Strip out any component of new direction more than 90 deg off current heading (spaz_node.cc:1974-1988)
+    dot = in_x * c_x + in_y * c_y
+    if dot < 0.0:
+        in_x -= run_gas * (c_x * dot)
+        in_y -= run_gas * (c_y * dot)
+        n_len = math.hypot(in_x, in_y)
+        if n_len > 0.0001:
+            in_x /= n_len
+            in_y /= n_len
+
+    # Speed-dependent inertia smoothing (spaz_node.cc:2013-2022)
+    # Higher run_gas and higher speed preserve current heading more strongly
+    smoothing = 0.975 * (0.90 + 0.10 * run_gas)
+    if current_speed < 2.0:
+        smoothing *= (current_speed / 2.0)
+
+    # Frame-rate independent adaptation (base ~120hz in Ballistica)
+    smooth_factor = math.pow(smoothing, dt * 120.0)
+    blend_x = smooth_factor * cur_dir_x + (1.0 - smooth_factor) * (in_x * input_len)
+    blend_y = smooth_factor * cur_dir_y + (1.0 - smooth_factor) * (in_y * input_len)
+
+    return blend_x, blend_y
+
+
+def calculate_ballistica_torso_tilt_and_sway(
+    v_mag, accel_fwd, accel_side, run_gas, roll_amt, spin_rate, is_holding,
+    diff_smooth_side=0.0, diff_smooth_fwd=0.0,
+    diff_smoother_side=0.0, diff_smoother_fwd=0.0
+):
+    """
+    Ballistica's acceleration tilt and gait roll sway (spaz_node.cc:3344-3378, 3449-3456).
+
+    Args:
+        v_mag: scalar speed (min clamped to 7.0 for response sensitivity)
+        accel_fwd: forward acceleration along character heading
+        accel_side: lateral acceleration (side-to-side)
+        run_gas: current running intensity [0, 1]
+        roll_amt: gait roll cycle [0, 2*pi]
+        spin_rate: angular velocity magnitude (rad/s)
+        is_holding: bool, whether character is carrying an object
+        diff_smooth_*: short-term input jerk
+        diff_smoother_*: medium-term running input derivative
+
+    Returns:
+        (tilt_pitch, tilt_roll, stride_sway_roll)
+    """
+    v_eff = max(7.0, v_mag)
+    gas_mult = 0.20 + 0.80 * run_gas
+
+    # Base acceleration tilts (clamped to +-0.9 in Ballistica)
+    tilt_roll_raw = gas_mult * max(-0.9, min(0.9, v_eff * accel_side * 0.05))
+    tilt_pitch_raw = gas_mult * max(-0.9, min(0.9, v_eff * accel_fwd * -0.05))
+
+    fast = min(1.0, v_mag / 5.0)
+    tilt_roll_raw += (1.0 - fast) * (diff_smooth_side * 1.5) + fast * (diff_smoother_side * 4.0)
+    tilt_pitch_raw += (1.0 - fast) * (diff_smooth_fwd * 1.5) + fast * (diff_smoother_fwd * 4.0)
+
+    rotate_tilt = 1.2
+    if is_holding:
+        rotate_tilt *= 0.5
+
+    # If spinning rapidly, suppress tilt so character does not wobble off-axis (spaz_node.cc:3375-3378)
+    if spin_rate > 10.0:
+        rotate_tilt = 0.0
+    elif spin_rate > 5.0:
+        rotate_tilt *= 1.0 - (spin_rate - 5.0) / 5.0
+
+    tilt_roll = tilt_roll_raw * rotate_tilt * 16.0   # convert to degrees
+    tilt_pitch = tilt_pitch_raw * rotate_tilt * 16.0
+
+    # Stride sway synchronized with footfall (spaz_node.cc:3450-3455)
+    sway_rad = math.sin(roll_amt - math.pi) * (run_gas * 0.09 + (1.0 - run_gas) * 0.04)
+    stride_sway_deg = math.degrees(sway_rad)
+
+    return tilt_pitch, tilt_roll, stride_sway_deg
+
+
+def calculate_ballistica_airborne_legs(roll_amt):
+    """
+    Ballistica's counter-rotating leg flail when airborne with lost balance (spaz_node.cc:2431-2457).
+    Feet cycle along cycloidal arcs:
+        left:  y = -0.3, z =  0.22 * cos(roll_amt)
+        right: y = -0.3, z = -0.22 * cos(roll_amt)
+
+    Returns:
+        (l_pitch, l_roll, r_pitch, r_roll)
+    """
+    z_left = 0.22 * math.cos(roll_amt)
+    l_pitch = math.degrees(math.atan2(z_left, 0.40))
+    r_pitch = -l_pitch
+    l_roll = -6.0 + math.sin(roll_amt) * 4.0
+    r_roll =  6.0 - math.sin(roll_amt) * 4.0
+
+    return l_pitch, l_roll, r_pitch, r_roll
+
+
+def calculate_ballistica_limb_stretch(current_dist, rest_dist=0.20, max_stretch=1.35):
+    """
+    Ballistica dynamic limb mesh elasticity (spaz_node.cc:4275-4306, 4350-4375).
+    Scales limb bone length along primary axis during reaching or punching.
+
+    Returns:
+        stretch_factor: float between 0.85 and max_stretch
+    """
+    if rest_dist <= 0.001:
+        return 1.0
+    ratio = current_dist / rest_dist
+    return max(0.85, min(max_stretch, ratio))
+
+
+def calculate_ballistica_throw_physics(
+    fwd_vec, move_scale, since_pickup_ms, is_bomb_reversed=False
+):
+    """
+    Ballistica throw power scaling, launch velocity, and character kickback (spaz_node.cc:1543-1572, 3771-3850).
+
+    Args:
+        fwd_vec: Vec3 forward unit vector of character
+        move_scale: scalar magnitude of movement input [0, 1]
+        since_pickup_ms: elapsed milliseconds since object was picked up
+        is_bomb_reversed: if True (bomb button held), throw backwards lightly
+
+    Returns:
+        (launch_velocity, kickback_impulse)
+    """
+    throw_power = 0.80 * (0.60 + 0.40 * min(1.0, move_scale))
+
+    # Penalty for throws executed immediately after pickup (spaz_node.cc:1558-1560)
+    if since_pickup_ms < 500.0:
+        throw_power *= 0.40 + 0.60 * (since_pickup_ms / 500.0)
+
+    # Ballistica forces: 50.0 forward, 80.0 upward
+    if is_bomb_reversed:
+        launch_vel = fwd_vec * (-throw_power * 3.5) + (0, 0, throw_power * 5.0)
+        kickback = fwd_vec * (throw_power * 0.8)
+    else:
+        launch_vel = fwd_vec * (throw_power * 14.0) + (0, 0, throw_power * 6.5)
+        # Kickback impulse on torso (spaz_node.cc:3829, 3844-3846)
+        kickback = -fwd_vec * (throw_power * 1.8)
+
+    return launch_vel, kickback
+
