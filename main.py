@@ -19,7 +19,7 @@ from direct.showbase.ShowBase import ShowBase
 from panda3d.core import (Vec3, Vec4, Point3, Filename, DirectionalLight, AmbientLight,
                            PointLight, CardMaker, LineSegs, AntialiasAttrib,
                            loadPrcFileData, TextNode, KeyboardButton,
-                           WindowProperties, MouseButton)
+                           WindowProperties, MouseButton, BitMask32)
 from panda3d.bullet import BulletWorld, BulletPlaneShape, BulletRigidBodyNode
 from direct.gui.OnscreenText import OnscreenText
 
@@ -34,92 +34,125 @@ from props import (InteractiveCrate, BowlingPin, GunWeapon, SpentCasing,
 loadPrcFileData("", "window-title PuppetEngine - Pure Python TPS & Physics Sandbox")
 loadPrcFileData("", "win-size 1280 720")
 loadPrcFileData("", "sync-video 1")
+loadPrcFileData("", "bullet-filter-algorithm groups-mask")
+loadPrcFileData("", "bullet-solver-iterations 12")
+loadPrcFileData("", "bullet-split-impulse true")
 
 
-class BulletTracer:
-    def __init__(self, render, p_from, p_to):
+class PooledBulletTracer:
+    def __init__(self, root, unit_geom):
+        self.np = root.attachNewNode(unit_geom)
+        self.np.hide()
+        self.life = 0.0
+
+    def spawn(self, p_from, p_to):
         self.life = 0.07
-        ls = LineSegs()
-        ls.setColor(1.0, 0.75, 0.20, 1.0)
-        ls.setThickness(3.0)
-        ls.moveTo(p_from)
-        ls.drawTo(p_to)
-        self.np = render.attachNewNode(ls.create())
+        diff = p_to - p_from
+        dist = diff.length()
+        if dist > 0.001:
+            self.np.setPos(p_from)
+            self.np.lookAt(p_to)
+            self.np.setScale(1.0, dist, 1.0)
+            self.np.setColorScale(1.0, 0.75, 0.20, 1.0)
+            self.np.show()
+        else:
+            self.np.hide()
 
     def update(self, dt):
-        self.life -= dt
-        if self.life <= 0:
-            self.np.removeNode()
-            return False
-        return True
+        if self.life > 0.0:
+            self.life -= dt
+            if self.life <= 0.0:
+                self.np.hide()
+                return False
+            return True
+        return False
 
 
-class MuzzleFlash:
-    def __init__(self, render, loader, pos):
+class PooledMuzzleFlash:
+    def __init__(self, root, sphere_proto):
+        self.np = sphere_proto.copyTo(root) if sphere_proto else root.attachNewNode("flash")
+        self.np.hide()
+        self.life = 0.0
+
+    def spawn(self, pos):
         self.life = 0.04
-        self.np = render.attachNewNode(loader.loadModel("models/misc/sphere").node())
         self.np.setPos(pos)
         self.np.setScale(0.12)
-        self.np.setColor(1.0, 0.90, 0.30, 1.0)
+        self.np.setColorScale(1.0, 0.90, 0.30, 1.0)
+        self.np.show()
 
     def update(self, dt):
-        self.life -= dt
-        if self.life <= 0:
-            self.np.removeNode()
-            return False
-        return True
+        if self.life > 0.0:
+            self.life -= dt
+            if self.life <= 0.0:
+                self.np.hide()
+                return False
+            return True
+        return False
 
 
-class DustPuff:
-    def __init__(self, render, loader, pos):
+class PooledDustPuff:
+    def __init__(self, root, sphere_proto):
+        self.np = sphere_proto.copyTo(root) if sphere_proto else root.attachNewNode("dust")
+        self.np.hide()
+        self.life = 0.0
+        self.max_life = 0.35
+
+    def spawn(self, pos):
         self.life = 0.35
         self.max_life = 0.35
-        self.np = render.attachNewNode(loader.loadModel("models/misc/sphere").node())
         self.np.setPos(*pos)
         self.np.setScale(0.08)
-        self.np.setColor(0.9, 0.9, 0.9, 0.6)
+        self.np.setColorScale(0.9, 0.9, 0.9, 0.6)
+        self.np.show()
 
     def update(self, dt):
-        self.life -= dt
-        if self.life <= 0:
-            self.np.removeNode()
-            return False
-        progress = 1.0 - (self.life / self.max_life)
-        scale = 0.08 + progress * 0.22
-        alpha = (self.life / self.max_life) * 0.6
-        self.np.setScale(scale)
-        self.np.setColor(0.9, 0.9, 0.9, alpha)
-        return True
+        if self.life > 0.0:
+            self.life -= dt
+            if self.life <= 0.0:
+                self.np.hide()
+                return False
+            progress = 1.0 - (self.life / self.max_life)
+            scale = 0.08 + progress * 0.22
+            alpha = (self.life / self.max_life) * 0.6
+            self.np.setScale(scale)
+            self.np.setColorScale(0.9, 0.9, 0.9, alpha)
+            return True
+        return False
 
 
-class KineticSpark:
-    """
-    Directional Kinetic Spark (adapted from A3P SparkParticleGroup):
-    Arcs off bullet impacts and explosions along the reflection vector,
-    drawn as a fast-moving glowing line segment under gravity.
-    """
-    def __init__(self, render, pos, vel, life=0.25):
-        self.render = render
+class PooledSpark:
+    def __init__(self, root, unit_geom):
+        self.np = root.attachNewNode(unit_geom)
+        self.np.hide()
+        self.pos = Point3(0, 0, 0)
+        self.vel = Vec3(0, 0, 0)
+        self.life = 0.0
+        self.max_life = 0.25
+
+    def spawn(self, pos, vel, life=0.25):
         self.pos = Point3(pos)
         self.vel = Vec3(vel)
         self.life = life
         self.max_life = life
-        self.ls = LineSegs("spark")
-        self.ls.setColor(1.0, 0.85, 0.35, 1.0)
-        self.ls.setThickness(2.0)
-        self.ls.moveTo(self.pos)
-        self.ls.drawTo(self.pos - self.vel * 0.015)
-        self.np = render.attachNewNode(self.ls.create())
+        self.np.setPos(self.pos)
+        if self.vel.lengthSquared() > 0.001:
+            self.np.lookAt(self.pos - self.vel)
+            self.np.setScale(1.0, max(0.01, self.vel.length() * 0.02), 1.0)
+        self.np.setColorScale(1.0, 0.85, 0.35, 1.0)
+        self.np.show()
 
     def update(self, dt):
-        self.life -= dt
-        if self.life <= 0:
-            self.np.removeNode()
+        if self.life <= 0.0:
             return False
-        # Gravity on sparks
+        self.life -= dt
+        if self.life <= 0.0:
+            self.np.hide()
+            return False
+
+        # Gravity and bounce
         self.vel.z -= 28.0 * dt
         new_pos = self.pos + self.vel * dt
-        # Bounce off floor if hitting ground
         if new_pos.z < 0.01:
             new_pos.z = 0.01
             self.vel.z = -self.vel.z * 0.35
@@ -127,43 +160,42 @@ class KineticSpark:
             self.vel.y *= 0.65
         self.pos = new_pos
 
-        self.np.removeNode()
-        self.ls.reset()
         alpha = max(0.0, self.life / self.max_life)
-        self.ls.setColor(1.0, 0.82 * alpha + 0.15, 0.20 * alpha, alpha)
-        self.ls.setThickness(2.0)
-        self.ls.moveTo(self.pos)
-        self.ls.drawTo(self.pos - self.vel * 0.02)
-        self.np = self.render.attachNewNode(self.ls.create())
+        self.np.setPos(self.pos)
+        if self.vel.lengthSquared() > 0.001:
+            self.np.lookAt(self.pos - self.vel)
+            self.np.setScale(1.0, max(0.01, self.vel.length() * 0.02), 1.0)
+        self.np.setColorScale(1.0, 0.82 * alpha + 0.15, 0.20 * alpha, alpha)
         return True
 
 
-class ExplosionFireball:
-    """
-    Expanding Kinetic Fireball (adapted from A3P ExplosionParticleGroup):
-    Rapidly expands from blast center, shifting from white-hot core to fiery orange,
-    then fading to dark smoke.
-    """
-    def __init__(self, render, loader, pos, radius=1.8):
-        self.render = render
+class PooledExplosionFireball:
+    def __init__(self, root, sphere_proto):
+        self.np = sphere_proto.copyTo(root) if sphere_proto else root.attachNewNode("fireball")
+        self.np.hide()
+        self.life = 0.0
+        self.max_life = 0.45
+        self.max_radius = 1.8
+
+    def spawn(self, pos, radius=1.8):
         self.life = 0.45
         self.max_life = 0.45
         self.max_radius = radius
-        self.np = render.attachNewNode(loader.loadModel("models/misc/sphere").node())
         self.np.setPos(pos)
         self.np.setScale(0.2)
-        self.np.setColor(1.0, 0.95, 0.8, 1.0)
+        self.np.setColorScale(1.0, 0.95, 0.8, 1.0)
+        self.np.show()
 
     def update(self, dt):
+        if self.life <= 0.0:
+            return False
         self.life -= dt
-        if self.life <= 0:
-            self.np.removeNode()
+        if self.life <= 0.0:
+            self.np.hide()
             return False
         progress = 1.0 - (self.life / self.max_life)
-        # Expansion curve
         scale = 0.2 + (self.max_radius - 0.2) * (progress ** 0.6)
         self.np.setScale(scale)
-        # Color transition: white-hot -> fiery orange -> dark smoke
         if progress < 0.3:
             r = 1.0; g = 0.95 - progress * 1.5; b = 0.6 - progress * 1.5; a = 0.95
         else:
@@ -172,8 +204,166 @@ class ExplosionFireball:
             g = 0.4 * (1.0 - p2) + 0.15 * p2
             b = 0.1 * (1.0 - p2) + 0.15 * p2
             a = max(0.0, 0.95 * (1.0 - p2))
-        self.np.setColor(r, g, b, a)
+        self.np.setColorScale(r, g, b, a)
         return True
+
+
+class VFXManager:
+    """
+    Zero-Allocation High-Performance Particle & VFX Engine:
+    Pre-allocates bounded NodePath pools for sparks, dust, tracers, flashes, and fireballs.
+    Recycles instances via fast show/hide state switches without creating or destroying
+    Panda3D GeomNodes at runtime.
+    """
+    def __init__(self, render, loader):
+        self.render = render
+        self.loader = loader
+
+        # Shared static prototypes
+        ls_spark = LineSegs("unit_spark")
+        ls_spark.setColor(1, 1, 1, 1)
+        ls_spark.setThickness(2.0)
+        ls_spark.moveTo(0, 0, 0)
+        ls_spark.drawTo(0, -1.0, 0)
+        self.unit_spark_geom = ls_spark.create()
+
+        ls_tracer = LineSegs("unit_tracer")
+        ls_tracer.setColor(1, 1, 1, 1)
+        ls_tracer.setThickness(3.0)
+        ls_tracer.moveTo(0, 0, 0)
+        ls_tracer.drawTo(0, 1.0, 0)
+        self.unit_tracer_geom = ls_tracer.create()
+
+        self.sphere_proto = loader.loadModel("models/misc/sphere") if loader else None
+
+        self.vfx_root = render.attachNewNode("vfx_root")
+
+        # Spark Pool
+        self.sparks = [PooledSpark(self.vfx_root, self.unit_spark_geom) for _ in range(MAX_ACTIVE_SPARKS)]
+        self.free_sparks = list(self.sparks)
+        self.active_sparks = []
+
+        # Dust Pool
+        self.dust = [PooledDustPuff(self.vfx_root, self.sphere_proto) for _ in range(MAX_ACTIVE_DUST)] if self.sphere_proto else []
+        self.free_dust = list(self.dust)
+        self.active_dust = []
+
+        # Tracer Pool
+        self.tracers = [PooledBulletTracer(self.vfx_root, self.unit_tracer_geom) for _ in range(MAX_ACTIVE_TRACERS)]
+        self.free_tracers = list(self.tracers)
+        self.active_tracers = []
+
+        # Muzzle Flash Pool
+        self.flashes = [PooledMuzzleFlash(self.vfx_root, self.sphere_proto) for _ in range(MAX_ACTIVE_FLASHES)] if self.sphere_proto else []
+        self.free_flashes = list(self.flashes)
+        self.active_flashes = []
+
+        # Fireball Pool
+        self.fireballs = [PooledExplosionFireball(self.vfx_root, self.sphere_proto) for _ in range(MAX_ACTIVE_FIREBALLS)] if self.sphere_proto else []
+        self.free_fireballs = list(self.fireballs)
+        self.active_fireballs = []
+
+    def spawn_spark(self, pos, vel, life=0.25):
+        if self.free_sparks:
+            s = self.free_sparks.pop()
+        elif self.active_sparks:
+            s = self.active_sparks.pop(0)
+        else:
+            return
+        s.spawn(pos, vel, life)
+        self.active_sparks.append(s)
+
+    def spawn_dust(self, pos):
+        if not self.dust:
+            return
+        if self.free_dust:
+            d = self.free_dust.pop()
+        elif self.active_dust:
+            d = self.active_dust.pop(0)
+        else:
+            return
+        d.spawn(pos)
+        self.active_dust.append(d)
+
+    def spawn_tracer(self, p_from, p_to):
+        if self.free_tracers:
+            t = self.free_tracers.pop()
+        elif self.active_tracers:
+            t = self.active_tracers.pop(0)
+        else:
+            return
+        t.spawn(p_from, p_to)
+        self.active_tracers.append(t)
+
+    def spawn_flash(self, pos):
+        if not self.flashes:
+            return
+        if self.free_flashes:
+            f = self.free_flashes.pop()
+        elif self.active_flashes:
+            f = self.active_flashes.pop(0)
+        else:
+            return
+        f.spawn(pos)
+        self.active_flashes.append(f)
+
+    def spawn_fireball(self, pos, radius=1.8):
+        if not self.fireballs:
+            return
+        if self.free_fireballs:
+            fb = self.free_fireballs.pop()
+        elif self.active_fireballs:
+            fb = self.active_fireballs.pop(0)
+        else:
+            return
+        fb.spawn(pos, radius)
+        self.active_fireballs.append(fb)
+
+    def update(self, dt):
+        if self.active_sparks:
+            alive = []
+            for s in self.active_sparks:
+                if s.update(dt):
+                    alive.append(s)
+                else:
+                    self.free_sparks.append(s)
+            self.active_sparks = alive
+
+        if self.active_dust:
+            alive = []
+            for d in self.active_dust:
+                if d.update(dt):
+                    alive.append(d)
+                else:
+                    self.free_dust.append(d)
+            self.active_dust = alive
+
+        if self.active_tracers:
+            alive = []
+            for t in self.active_tracers:
+                if t.update(dt):
+                    alive.append(t)
+                else:
+                    self.free_tracers.append(t)
+            self.active_tracers = alive
+
+        if self.active_flashes:
+            alive = []
+            for f in self.active_flashes:
+                if f.update(dt):
+                    alive.append(f)
+                else:
+                    self.free_flashes.append(f)
+            self.active_flashes = alive
+
+        if self.active_fireballs:
+            alive = []
+            for fb in self.active_fireballs:
+                if fb.update(dt):
+                    alive.append(fb)
+                else:
+                    self.free_fireballs.append(fb)
+            self.active_fireballs = alive
 
 
 class DynamicFlashLight:
@@ -219,6 +409,29 @@ class PuppetEngine(ShowBase):
         self.bullet = BulletWorld()
         self.bullet.setGravity(Vec3(0, 0, GRAVITY))
 
+        # Bullet Broadphase Collision Filtering Matrix:
+        # Ground collides with everything
+        self.bullet.setGroupCollisionFlag(COLLISION_GROUP_GROUND, COLLISION_GROUP_CHAR, True)
+        self.bullet.setGroupCollisionFlag(COLLISION_GROUP_GROUND, COLLISION_GROUP_PROP, True)
+        self.bullet.setGroupCollisionFlag(COLLISION_GROUP_GROUND, COLLISION_GROUP_WEAPON, True)
+        self.bullet.setGroupCollisionFlag(COLLISION_GROUP_GROUND, COLLISION_GROUP_GRENADE, True)
+        self.bullet.setGroupCollisionFlag(COLLISION_GROUP_GROUND, COLLISION_GROUP_HELD, True)
+        self.bullet.setGroupCollisionFlag(COLLISION_GROUP_GROUND, COLLISION_GROUP_DEBRIS, True)
+
+        # Character collides with Ground and Props
+        # WEAPONS, GRENADES, HELD PROPS, AND DEBRIS NEVER COLLIDE WITH THE CHARACTER!
+        self.bullet.setGroupCollisionFlag(COLLISION_GROUP_CHAR, COLLISION_GROUP_PROP, True)
+        self.bullet.setGroupCollisionFlag(COLLISION_GROUP_CHAR, COLLISION_GROUP_WEAPON, False)
+        self.bullet.setGroupCollisionFlag(COLLISION_GROUP_CHAR, COLLISION_GROUP_GRENADE, False)
+        self.bullet.setGroupCollisionFlag(COLLISION_GROUP_CHAR, COLLISION_GROUP_HELD, False)
+        self.bullet.setGroupCollisionFlag(COLLISION_GROUP_CHAR, COLLISION_GROUP_DEBRIS, False)
+
+        # Props collide with Props, Weapons, Grenades, and Held objects
+        self.bullet.setGroupCollisionFlag(COLLISION_GROUP_PROP, COLLISION_GROUP_PROP, True)
+        self.bullet.setGroupCollisionFlag(COLLISION_GROUP_PROP, COLLISION_GROUP_WEAPON, True)
+        self.bullet.setGroupCollisionFlag(COLLISION_GROUP_PROP, COLLISION_GROUP_GRENADE, True)
+        self.bullet.setGroupCollisionFlag(COLLISION_GROUP_PROP, COLLISION_GROUP_HELD, True)
+
         self._make_ground()
         self._make_lights()
 
@@ -240,6 +453,9 @@ class PuppetEngine(ShowBase):
                         self.sounds[sfx_name] = snd
                         break
 
+        # High-performance zero-allocation particle and VFX manager
+        self.vfx = VFXManager(self.render, self.loader)
+
         # ── Puppet Character ──
         self.puppet = PuppetCharacter(self.bullet, self.render, self.loader, (0, 0, 0))
         self.puppet.set_dust_callback(self.spawn_dust)
@@ -251,12 +467,7 @@ class PuppetEngine(ShowBase):
         self.props = []
         self._spawn_props()
 
-        self.dust_puffs = []
-        self.tracers    = []
-        self.flashes    = []
         self.casings    = []
-        self.sparks     = []
-        self.fireballs  = []
         self.grenades   = []
 
         cm = CardMaker("shadow")
@@ -286,9 +497,10 @@ class PuppetEngine(ShowBase):
 
         self.cam_pivot = self.render.attachNewNode("cam_pivot")
         self.cam_pitch_pivot = self.cam_pivot.attachNewNode("cam_pitch_pivot")
-        self.camera.reparentTo(self.cam_pitch_pivot)
-        self.camera.setPos(0, -self.cam_dist, 0.20)
-        self.camera.lookAt(Point3(0, 0, 0.20))
+        if self.camera:
+            self.camera.reparentTo(self.cam_pitch_pivot)
+            self.camera.setPos(0, -self.cam_dist, 0.20)
+            self.camera.lookAt(Point3(0, 0, 0.20))
 
         self._set_mouse_lock(True)
         self._bind_actions()
@@ -332,14 +544,16 @@ class PuppetEngine(ShowBase):
             snd.play()
 
     def spawn_dust(self, pos):
-        puff = DustPuff(self.render, self.loader, pos)
-        self.dust_puffs.append(puff)
+        self.vfx.spawn_dust(pos)
 
     def _cycle_camera_zoom(self):
         self.cam_zoom_index = (self.cam_zoom_index + 1) % len(self.cam_zoom_presets)
         self.cam_target_dist = self.cam_zoom_presets[self.cam_zoom_index]
 
     def _eject_casing(self, muzzle_pos, fwd, is_shotgun):
+        while len(self.casings) >= MAX_ACTIVE_CASINGS:
+            oldest = self.casings.pop(0)
+            oldest.destroy()
         rgt = Vec3(fwd.y, -fwd.x, 0)
         up  = Vec3(0, 0, 1)
         casing = SpentCasing(self.bullet, self.render, self.loader, muzzle_pos, fwd, rgt, up, is_shotgun)
@@ -354,7 +568,7 @@ class PuppetEngine(ShowBase):
             bullet_dir = bullet_diff.normalized()
         p_to = Point3(p_from + bullet_dir * 90.0)
 
-        self.flashes.append(MuzzleFlash(self.render, self.loader, p_from))
+        self.vfx.spawn_flash(p_from)
 
         active_gun = self.puppet.get_active_gun()
         if active_gun:
@@ -366,12 +580,12 @@ class PuppetEngine(ShowBase):
             hit_node = result.getNode()
             if hit_node == self.puppet.physics_body:
                 # Ignore self collision from muzzle offset
-                self.tracers.append(BulletTracer(self.render, p_from, p_to))
+                self.vfx.spawn_tracer(p_from, p_to)
                 return
 
             hit_pos = result.getHitPos()
             hit_norm = result.getHitNormal()
-            self.tracers.append(BulletTracer(self.render, p_from, hit_pos))
+            self.vfx.spawn_tracer(p_from, hit_pos)
             self.spawn_dust(hit_pos)
 
             # Directional kinetic spark burst along surface reflection (A3P inspired)
@@ -379,7 +593,7 @@ class PuppetEngine(ShowBase):
             for _ in range(num_sparks):
                 refl_dir = calculate_ricochet_reflection(bullet_dir, hit_norm, spread=0.35)
                 s_vel = refl_dir * random.uniform(8.0, 18.0) + Vec3(0, 0, random.uniform(1.0, 3.5))
-                self.sparks.append(KineticSpark(self.render, hit_pos, s_vel, life=random.uniform(0.18, 0.32)))
+                self.vfx.spawn_spark(hit_pos, s_vel, life=random.uniform(0.18, 0.32))
 
             # Authentic bullet ricochet audio
             if random.random() < 0.40:
@@ -412,7 +626,7 @@ class PuppetEngine(ShowBase):
                 self.play_sfx("punch_hit")
                 self.hit_stop.trigger(0.038)
         else:
-            self.tracers.append(BulletTracer(self.render, p_from, p_to))
+            self.vfx.spawn_tracer(p_from, p_to)
 
     def trigger_explosion(self, blast_pos, radius=7.5, max_force=65.0, trauma=0.55, source_obj=None):
         """
@@ -432,19 +646,21 @@ class PuppetEngine(ShowBase):
         if hasattr(self, "flash_light"):
             self.flash_light.trigger(blast_pos, Vec4(1.0, 0.70, 0.25, 1), intensity=3.5)
 
-        self.fireballs.append(ExplosionFireball(self.render, self.loader, blast_pos, radius=radius * 0.35))
+        self.vfx.spawn_fireball(blast_pos, radius=radius * 0.35)
         for _ in range(8):
             offset = Vec3(random.uniform(-0.6, 0.6), random.uniform(-0.6, 0.6), random.uniform(0.1, 0.8))
-            self.dust_puffs.append(DustPuff(self.render, self.loader, blast_pos + offset))
+            self.vfx.spawn_dust(blast_pos + offset)
 
         for _ in range(24):
             rand_dir = Vec3(random.uniform(-1, 1), random.uniform(-1, 1), random.uniform(0.2, 1.2)).normalized()
             s_vel = rand_dir * random.uniform(12.0, 26.0)
-            self.sparks.append(KineticSpark(self.render, blast_pos, s_vel, life=random.uniform(0.3, 0.6)))
+            self.vfx.spawn_spark(blast_pos, s_vel, life=random.uniform(0.3, 0.6))
 
         # Radial impulse on props
         for prop in list(self.props):
-            if prop == source_obj or getattr(prop, "is_held", False):
+            if prop == source_obj or getattr(prop, "is_held", False) or getattr(prop, "has_exploded", False):
+                continue
+            if hasattr(prop, "np") and prop.np.isEmpty():
                 continue
             prop_pos = prop.get_pos()
             impulse, ratio, is_in = calculate_radial_explosion_impulse(blast_pos, prop_pos, max_force, radius, upward_lift=7.0)
@@ -452,6 +668,9 @@ class PuppetEngine(ShowBase):
                 prop.apply_impulse(impulse, blast_pos)
                 if hasattr(prop, "take_damage"):
                     prop.take_damage(40.0 * ratio, blast_pos)
+
+        # Purge exploded props immediately so subsequent detonations in the same frame don't encounter them
+        self.props = [p for p in self.props if not getattr(p, "has_exploded", False)]
 
         # Radial impulse and balance decay on puppet character
         puppet_pos = self.puppet.get_torso_pos()
@@ -475,6 +694,7 @@ class PuppetEngine(ShowBase):
         node  = BulletRigidBodyNode("ground")
         node.setFriction(0.5)
         node.addShape(shape)
+        node.setIntoCollideMask(BitMask32.bit(COLLISION_GROUP_GROUND))
         self.render.attachNewNode(node).setPos(0, 0, 0)
         self.bullet.attachRigidBody(node)
         self.ground_node = node
@@ -595,7 +815,7 @@ class PuppetEngine(ShowBase):
             self.gv.setColor(0.20, 0.46, 0.22, 1)
 
     def _update(self, task):
-        raw_dt = min(globalClock.getDt(), 0.05)
+        raw_dt = min(globalClock.getDt(), PHYSICS_MAX_DT)
         dt = self.hit_stop.process_dt(raw_dt)
 
         # ── UNRESTRICTED FULL 360° MOUSE LOOK ──
@@ -641,7 +861,8 @@ class PuppetEngine(ShowBase):
         else:
             actual_dist = self.cam_dist
 
-        self.camera.setPos(self.shoulder_x, -actual_dist, 0.20)
+        if self.camera:
+            self.camera.setPos(self.shoulder_x, -actual_dist, 0.20)
 
         # ── VELOCITY-COUPLED DYNAMIC FOV WARP ──
         char_v = self.puppet.physics_body.getLinearVelocity()
@@ -653,18 +874,21 @@ class PuppetEngine(ShowBase):
             self.camLens.setFov(cur_fov)
 
         # ── TWO-RAY PINPOINT CROSSHAIR RAYCAST ──
-        cam_world_pos  = self.camera.getPos(self.render)
-        cam_world_quat = self.camera.getQuat(self.render)
-        cam_fwd = cam_world_quat.getForward()
+        if self.camera:
+            cam_world_pos  = self.camera.getPos(self.render)
+            cam_world_quat = self.camera.getQuat(self.render)
+            cam_fwd = cam_world_quat.getForward()
 
-        p_from = Point3(cam_world_pos)
-        p_to   = Point3(cam_world_pos + cam_fwd * 100.0)
+            p_from = Point3(cam_world_pos)
+            p_to   = Point3(cam_world_pos + cam_fwd * 100.0)
 
-        cam_ray = self.bullet.rayTestClosest(p_from, p_to)
-        if cam_ray.hasHit() and cam_ray.getNode() != self.puppet.physics_body:
-            self.current_3d_target = cam_ray.getHitPos()
+            cam_ray = self.bullet.rayTestClosest(p_from, p_to)
+            if cam_ray.hasHit() and cam_ray.getNode() != self.puppet.physics_body:
+                self.current_3d_target = cam_ray.getHitPos()
+            else:
+                self.current_3d_target = p_to
         else:
-            self.current_3d_target = p_to
+            self.current_3d_target = Point3(0, 10, 1)
 
         # ── DIRECT HARDWARE POLLING (Continuous Shooting & Movement) ──
         is_btn = self.mouseWatcherNode.isButtonDown if getattr(self, "mouseWatcherNode", None) else lambda k: False
@@ -733,25 +957,11 @@ class PuppetEngine(ShowBase):
             self.crosshair.hide()
             self.hud_ammo.setText(f"[UNARMED] (PUNCH / THROW){grenade_tag}")
 
-        # Update VFX
-        active_dust = [p for p in self.dust_puffs if p.update(dt)]
-        self.dust_puffs = active_dust
-
-        active_tracers = [t for t in self.tracers if t.update(dt)]
-        self.tracers = active_tracers
-
-        active_flashes = [f for f in self.flashes if f.update(dt)]
-        self.flashes = active_flashes
-
-        active_sparks = [s for s in self.sparks if s.update(dt)]
-        self.sparks = active_sparks
-
-        active_fireballs = [f for f in self.fireballs if f.update(dt)]
-        self.fireballs = active_fireballs
+        # Update VFX via unified zero-allocation pool
+        self.vfx.update(dt)
 
         # Update Throwable Frag Grenades
-        active_grenades = [g for g in self.grenades if g.update(dt)]
-        self.grenades = active_grenades
+        self.grenades = [g for g in self.grenades if g.update(dt)]
 
         # Update Dynamic Flash Light
         if hasattr(self, "flash_light"):
@@ -766,8 +976,9 @@ class PuppetEngine(ShowBase):
                 prop.update_physics(dt)
         self.props = [p for p in self.props if not getattr(p, "has_exploded", False)]
 
-        # Step Bullet physics
-        self.bullet.doPhysics(dt, 10, 1.0 / 180.0)
+        # Step Bullet physics with deterministic substeps
+        if dt > 0.0001:
+            self.bullet.doPhysics(dt, PHYSICS_SUBSTEPS, PHYSICS_FIXED_DT)
 
         # Update Drop Shadow
         t_pos = self.puppet.get_torso_pos()

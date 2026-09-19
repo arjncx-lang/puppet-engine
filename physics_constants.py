@@ -11,13 +11,27 @@ TORSO_HEIGHT          = 0.32
 PELVIS_RADIUS         = 0.12
 PELVIS_HEIGHT         = 0.16
 
-# Limbs
+# Limbs & Articulated 2-Bone Geometry
 ARM_RADIUS            = 0.065
 ARM_LENGTH            = 0.32
+ARM_L1                = 0.20
+ARM_L2                = 0.18
 LEG_RADIUS            = 0.080
 LEG_LENGTH            = 0.36
+THIGH_LENGTH          = 0.19
+SHIN_LENGTH           = 0.17
+KNEE_RADIUS           = 0.076
 HAND_RADIUS           = 0.075
 FOOT_RADIUS           = 0.085
+
+# Bullet Physics Collision Groups (Filter Algorithm: groups-mask)
+COLLISION_GROUP_GROUND   = 0
+COLLISION_GROUP_CHAR     = 1
+COLLISION_GROUP_PROP     = 2
+COLLISION_GROUP_WEAPON   = 3
+COLLISION_GROUP_GRENADE  = 4
+COLLISION_GROUP_HELD     = 5
+COLLISION_GROUP_DEBRIS   = 6
 
 # Eye parameters
 EYE_OFFSET_X          = 0.070
@@ -57,10 +71,10 @@ SPRING_ZETA_CAM       = 1.00   # Critically damped camera follow
 BANK_MAX_DEG          = 25.0   # Max inward roll angle on cornering
 PITCH_MAX_DEG         = 20.0   # Max longitudinal pitch angle under acceleration/braking
 
-# Virtual Pneumatic Ground Suspension
+# Virtual Pneumatic Ground Suspension (Critically Damped 2nd-Order Harmonic Oscillator)
 SUSPENSION_REST_DIST  = 0.48   # Target ride height above ground
 SUSPENSION_K          = 480.0  # Spring stiffness (N/m)
-SUSPENSION_C          = 38.0   # Damping coefficient (N*s/m)
+SUSPENSION_C          = 96.0   # Damping coefficient (N*s/m, zeta ~ 0.90 critically damped)
 MAX_WALKABLE_SLOPE    = 48.0   # Maximum walkable slope in degrees
 
 # Cycloidal Gait Kinematics (Zero Foot Slip)
@@ -92,3 +106,19 @@ PICKUP_RADIUS         = 1.55   # Search distance to lift objects / guns
 PICKUP_LIFT_TIME      = 0.20   # Time for smooth lift from floor to overhead (s)
 THROW_VELOCITY        = 13.5   # Forward launch speed for thrown objects
 THROW_UP_VELOCITY     = 5.2    # Upward arc for thrown objects
+HOLD_CLEARANCE_FWD    = 0.50   # Safe forward distance for held objects to prevent clipping
+HOLD_CLEARANCE_Z      = 0.44   # Safe height for carried objects
+THROW_GRACE_TIME      = 0.30   # Duration to ignore player-prop collision upon release (s)
+
+# Memory Efficiency & Particle/VFX Pool Caps
+MAX_ACTIVE_CASINGS    = 24     # Maximum simultaneous physical spent shell casings
+MAX_ACTIVE_SPARKS     = 64     # Pre-allocated pooled kinetic spark nodes
+MAX_ACTIVE_DUST       = 24     # Pre-allocated pooled dust puff sphere nodes
+MAX_ACTIVE_TRACERS    = 16     # Pre-allocated pooled bullet tracer line nodes
+MAX_ACTIVE_FLASHES    = 8      # Pre-allocated pooled muzzle flash sphere nodes
+MAX_ACTIVE_FIREBALLS  = 6      # Pre-allocated pooled explosion fireball nodes
+
+# Bullet Physics Solver & Sub-stepping Configuration
+PHYSICS_SUBSTEPS      = 8      # Maximum internal simulation substeps per frame
+PHYSICS_FIXED_DT      = 1.0 / 120.0  # Internal 120 Hz deterministic physics tick (s)
+PHYSICS_MAX_DT        = 0.0333 # Maximum allowed external delta time clamp (s)

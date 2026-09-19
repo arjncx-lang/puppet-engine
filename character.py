@@ -1,7 +1,7 @@
 # character.py
 # Complete PuppetCharacter Engine with Procedural IK, Exact Spring-Dampers & Physics Biomechanics
 import math, random
-from panda3d.core import Vec3, TransformState, Point3
+from panda3d.core import Vec3, TransformState, Point3, BitMask32
 from panda3d.bullet import (BulletRigidBodyNode, BulletCapsuleShape, ZUp)
 from physics_constants import *
 from physics_math import (
@@ -199,6 +199,7 @@ class PuppetCharacter:
         node.setFriction(0.35)
         node.setDeactivationEnabled(False)
         node.setAngularFactor(Vec3(0, 0, 1))
+        node.setIntoCollideMask(BitMask32.bit(COLLISION_GROUP_CHAR))
 
         self.root_np = R.attachNewNode(node)
         spawn_z = z + total_height * 0.5 + 0.1
@@ -369,20 +370,60 @@ class PuppetCharacter:
 
                 self.gloves.append(glove_root)
 
-            # Legs & Shoes
-            for side in ("left", "right"):
-                pivot = self.leg_pivots[side]
-                leg = L.loadModel("models/misc/sphere")
-                leg.setScale(LEG_RADIUS, LEG_RADIUS, LEG_LENGTH * 0.5)
-                leg.setColor(0.18, 0.40, 0.82, 1)
-                leg.setPos(0, 0, -(LEG_LENGTH * 0.38))
-                leg.reparentTo(pivot)
+            # Legs & Shoes (Articulated 2-Bone Bipedal Limbs)
+            self.thigh_meshes = {}
+            self.knee_pivots = {}
+            self.knee_caps = {}
+            self.shin_meshes = {}
+            self.ankle_pivots = {}
+            self.shoe_meshes = {}
 
+            L_thigh = THIGH_LENGTH
+            L_shin  = SHIN_LENGTH
+
+            for side in ("left", "right"):
+                hip_pivot = self.leg_pivots[side]
+
+                # 1. Upper Thigh sleeve along -Z from 0 to -L_thigh
+                thigh = L.loadModel("models/misc/sphere")
+                thigh.setScale(LEG_RADIUS * 0.95, LEG_RADIUS * 0.95, L_thigh * 0.5)
+                thigh.setColor(0.18, 0.40, 0.82, 1)
+                thigh.setPos(0, 0, -(L_thigh * 0.5))
+                thigh.reparentTo(hip_pivot)
+                self.thigh_meshes[side] = thigh
+
+                # 2. Articulated Knee Pivot at (0, 0, -L_thigh)
+                knee = hip_pivot.attachNewNode(f"{side}_knee_pivot")
+                knee.setPos(0, 0, -L_thigh)
+                self.knee_pivots[side] = knee
+
+                # 3. Overlapping Knee Knuckle Cap
+                knee_cap = L.loadModel("models/misc/sphere")
+                knee_cap.setScale(KNEE_RADIUS)
+                knee_cap.setColor(0.18, 0.40, 0.82, 1)
+                knee_cap.reparentTo(knee)
+                self.knee_caps[side] = knee_cap
+
+                # 4. Lower Shin sleeve along -Z from 0 to -L_shin
+                shin = L.loadModel("models/misc/sphere")
+                shin.setScale(LEG_RADIUS * 0.88, LEG_RADIUS * 0.88, L_shin * 0.5)
+                shin.setColor(0.18, 0.40, 0.82, 1)
+                shin.setPos(0, 0, -(L_shin * 0.5))
+                shin.reparentTo(knee)
+                self.shin_meshes[side] = shin
+
+                # 5. Articulated Ankle Pivot at (0, 0, -L_shin)
+                ankle = knee.attachNewNode(f"{side}_ankle_pivot")
+                ankle.setPos(0, 0, -L_shin)
+                self.ankle_pivots[side] = ankle
+
+                # 6. Ergonomic Shoe/Foot
                 shoe = L.loadModel("models/misc/sphere")
-                shoe.setScale(FOOT_RADIUS * 0.95, FOOT_RADIUS * 1.3, FOOT_RADIUS * 0.7)
+                shoe.setScale(FOOT_RADIUS * 0.95, FOOT_RADIUS * 1.3, FOOT_RADIUS * 0.65)
                 shoe.setColor(0.20, 0.20, 0.24, 1)
-                shoe.setPos(0, FOOT_RADIUS * 0.35, -(LEG_LENGTH * 0.80))
-                shoe.reparentTo(pivot)
+                shoe.setPos(0, FOOT_RADIUS * 0.35, -0.01)
+                shoe.reparentTo(ankle)
+                self.shoe_meshes[side] = shoe
 
     def set_dust_callback(self, cb): self.dust_callback = cb
     def set_sfx_callback(self, cb): self.sfx_callback = cb
@@ -623,16 +664,26 @@ class PuppetCharacter:
                 self.held_prop = closest_target
                 self.lift_progress = 0.0
                 self.last_pickup_time = self.anim_time
-                closest_target.set_held(True)
+                closest_target.set_held(True, holder=self)
                 return ("prop", closest_target.name)
 
         return None
+
+    def on_held_prop_destroyed(self, prop):
+        """Safely detach a held prop if it explodes or is destroyed while being carried."""
+        if self.held_prop == prop:
+            self.held_prop = None
 
     def throw_held_object(self, is_bomb_reversed=False):
         if self.held_prop is None:
             return
         obj = self.held_prop
         self.held_prop = None
+
+        # Guard against exploded or deleted nodes
+        if getattr(obj, "has_exploded", False) or (hasattr(obj, "np") and obj.np.isEmpty()):
+            return
+
         obj.set_held(False)
 
         if self.sfx_callback:
@@ -650,7 +701,8 @@ class PuppetCharacter:
             is_bomb_reversed=is_bomb_reversed,
         )
 
-        obj.set_pos(torso_pos + fwd * 0.45 + Vec3(0, 0, 0.65))
+        # Place safely in front outside character collision bounds
+        obj.set_pos(torso_pos + fwd * 0.58 + Vec3(0, 0, 0.45))
         obj.set_linear_velocity(Vec3(launch_vel[0], launch_vel[1], launch_vel[2]))
 
         # Apply realistic Newton reaction kickback impulse to the thrower's torso (spaz_node.cc:3844-3846)
@@ -663,7 +715,10 @@ class PuppetCharacter:
         if self.sfx_callback:
             self.sfx_callback("stun")
         if self.held_prop:
-            self.throw_held_object()
+            if not getattr(self.held_prop, "has_exploded", False):
+                self.throw_held_object()
+            else:
+                self.held_prop = None
 
     def trigger_grenade_throw(self, target_3d_point):
         if self.grenades_count <= 0 or self.grenade_cooldown > 0.0 or self.knockout_timer > 0.0:
@@ -675,7 +730,7 @@ class PuppetCharacter:
 
         torso_pos = self.root_np.getPos()
         fwd = self.get_forward_vector()
-        spawn_pos = torso_pos + fwd * 0.45 + Vec3(0, 0, 0.55)
+        spawn_pos = torso_pos + fwd * 0.50 + Vec3(0, 0, 0.55)
 
         aim_diff = target_3d_point - spawn_pos
         dist = aim_diff.length()
@@ -705,7 +760,11 @@ class PuppetCharacter:
             if self.sfx_callback:
                 self.sfx_callback("stun")
             if self.held_prop:
-                self.throw_held_object()
+                if not getattr(self.held_prop, "has_exploded", False):
+                    self.throw_held_object()
+                else:
+                    self.held_prop = None
+
 
     def trigger_celebration(self, duration=1.5, side="both"):
         """
@@ -802,22 +861,23 @@ class PuppetCharacter:
         cur_v = body.getLinearVelocity()
         was_grounded = self.footing
 
-        # Raycast Virtual Pneumatic Ground Suspension Probe
+        # Raycast Virtual Pneumatic Ground Suspension Probe (filtered to ignore weapons on floor)
         torso_pos = self.root_np.getPos()
         p_from = Point3(torso_pos.x, torso_pos.y, torso_pos.z + 0.1)
-        p_to   = Point3(torso_pos.x, torso_pos.y, torso_pos.z - 1.3)
-        ray_res = self.world.rayTestClosest(p_from, p_to)
+        p_to   = Point3(torso_pos.x, torso_pos.y, torso_pos.z - 1.35)
+        ground_mask = BitMask32.bit(COLLISION_GROUP_GROUND) | BitMask32.bit(COLLISION_GROUP_PROP)
+        ray_res = self.world.rayTestClosest(p_from, p_to, ground_mask)
 
         if ray_res.hasHit() and ray_res.getNode() != self.physics_body:
             hit_p = ray_res.getHitPos()
             hit_dist = p_from.z - hit_p.z - 0.1
             self.ground_dist = hit_dist
             self.ground_normal = ray_res.getHitNormal()
-            self.footing = (hit_dist <= SUSPENSION_REST_DIST + 0.18 and abs(cur_v.z) < 4.0)
+            self.footing = (hit_dist <= SUSPENSION_REST_DIST + 0.22 and cur_v.z > -7.0)
 
             if self.footing and not do_jump:
                 f_susp = calculate_ground_suspension_force(hit_dist, SUSPENSION_REST_DIST, cur_v.z, SUSPENSION_K, SUSPENSION_C)
-                f_susp = max(-60.0, min(180.0, f_susp))
+                f_susp = max(-80.0, min(320.0, f_susp))
                 body.applyCentralForce(Vec3(0, 0, f_susp))
 
                 # Dynamic slope slip force
@@ -1059,13 +1119,13 @@ class PuppetCharacter:
 
         if self.held_prop:
             lift_s = math.sin(self.lift_progress * math.pi * 0.5)
-            stride_bob  = math.sin(self.roll_amt * 2.0) * 0.015 * self.run_gas
-            stride_sway = math.cos(self.roll_amt) * 0.02 * self.run_gas
-            # Realistic Chest-Braced Carry: rests securely against lower chest / upper abdomen
-            cur_z = 0.18 * (1.0 - lift_s) + (0.34 + stride_bob) * lift_s
-            fwd_offset = (0.46 * (1.0 - lift_s)) + (0.36 * lift_s)
-            pos = torso_pos + fwd * fwd_offset + Vec3(stride_sway, 0, cur_z)
-            self.held_prop.set_pos(pos)
+            stride_bob  = math.sin(self.roll_amt * 2.0) * 0.012 * self.run_gas
+            stride_sway = math.cos(self.roll_amt) * 0.016 * self.run_gas
+            # Clear forward carry position with zero torso capsule penetration
+            cur_z = 0.20 * (1.0 - lift_s) + (HOLD_CLEARANCE_Z + stride_bob) * lift_s
+            fwd_offset = (0.55 * (1.0 - lift_s)) + (HOLD_CLEARANCE_FWD * lift_s)
+            carry_pos = torso_pos + fwd * fwd_offset + rgt * stride_sway + up * cur_z
+            self.held_prop.set_pos(carry_pos)
 
         if (horiz_speed >= 5.0 or self.punch_timer > 0.0 or self.is_holding_gun()):
             target_eyelid_angle = 28.0
@@ -1105,7 +1165,7 @@ class PuppetCharacter:
         foot_p = self.foot_pitch_spring.update(target_fp, dt)
         foot_r = self.foot_roll_spring.update(target_fr, dt)
 
-        # ── CYCLOIDAL GAIT KINEMATICS (Zero Ground Slip with Ballistica Stride Extension) ──
+        # ── CYCLOIDAL GAIT KINEMATICS (Zero Ground Slip with Articulated 2-Bone Knee & Ankle IK) ──
         if self.footing:
             if speed > 0.25:
                 # Ballistica stride reach and step lift scaling
@@ -1124,22 +1184,40 @@ class PuppetCharacter:
                 l_x, l_z = cycloidal_step_displacement(self.gait_phase, stride_len, effective_step_height)
                 r_x, r_z = cycloidal_step_displacement(self.gait_phase + math.pi, stride_len, effective_step_height)
 
-                l_pitch = math.degrees(math.atan2(l_x, LEG_LENGTH * 1.1))
-                r_pitch = math.degrees(math.atan2(r_x, LEG_LENGTH * 1.1))
-                l_lift = (l_z / effective_step_height) * 15.0
-                r_lift = (r_z / effective_step_height) * 15.0
+                # Anatomical bipedal pitch: forward swing is negative pitch in Panda3D coordinates
+                l_hip_pitch = -math.degrees(math.atan2(l_x, LEG_LENGTH))
+                r_hip_pitch = -math.degrees(math.atan2(r_x, LEG_LENGTH))
 
-                self.leg_pivots["left"].setHpr(0, l_pitch + l_lift + foot_p, foot_r)
-                self.leg_pivots["right"].setHpr(0, r_pitch + r_lift + foot_p, foot_r)
+                # Articulated knee flexion: bends backward (+ pitch) during the swing phase
+                l_knee_flex = (l_z / max(0.001, effective_step_height)) * 48.0
+                r_knee_flex = (r_z / max(0.001, effective_step_height)) * 48.0
+
+                self.leg_pivots["left"].setHpr(0, l_hip_pitch + foot_p, foot_r)
+                self.knee_pivots["left"].setHpr(0, l_knee_flex, 0)
+                self.ankle_pivots["left"].setHpr(0, -(l_hip_pitch + l_knee_flex) + foot_p, foot_r)
+
+                self.leg_pivots["right"].setHpr(0, r_hip_pitch + foot_p, foot_r)
+                self.knee_pivots["right"].setHpr(0, r_knee_flex, 0)
+                self.ankle_pivots["right"].setHpr(0, -(r_hip_pitch + r_knee_flex) + foot_p, foot_r)
             else:
                 self.leg_pivots["left"].setHpr(0, foot_p, foot_r)
+                self.knee_pivots["left"].setHpr(0, 0, 0)
+                self.ankle_pivots["left"].setHpr(0, 0, 0)
+
                 self.leg_pivots["right"].setHpr(0, foot_p, foot_r)
+                self.knee_pivots["right"].setHpr(0, 0, 0)
+                self.ankle_pivots["right"].setHpr(0, 0, 0)
         else:
             self.gait_phase -= dt * 10.0
-            # Ballistica counter-rotating leg flail when airborne (spaz_node.cc:2431-2457)
+            # Ballistica counter-rotating leg flail when airborne with knee articulation (spaz_node.cc:2431-2457)
             l_pitch, l_roll, r_pitch, r_roll = calculate_ballistica_airborne_legs(self.anim_time * 11.0)
-            self.leg_pivots["left"].setHpr(0, l_pitch, l_roll)
-            self.leg_pivots["right"].setHpr(0, r_pitch, r_roll)
+            self.leg_pivots["left"].setHpr(0, -l_pitch, l_roll)
+            self.knee_pivots["left"].setHpr(0, max(15.0, abs(l_pitch) * 0.6), 0)
+            self.ankle_pivots["left"].setHpr(0, l_pitch * 0.4, 0)
+
+            self.leg_pivots["right"].setHpr(0, -r_pitch, r_roll)
+            self.knee_pivots["right"].setHpr(0, max(15.0, abs(r_pitch) * 0.6), 0)
+            self.ankle_pivots["right"].setHpr(0, r_pitch * 0.4, 0)
 
         # ── INVERTED PENDULUM BIOMECHANICAL BANKING & ACCELERATION PITCH ──
         bank_roll = calculate_centrifugal_bank_angle(speed, self.angular_vel_y, abs(GRAVITY), BANK_MAX_DEG)
@@ -1568,14 +1646,10 @@ class PuppetCharacter:
         if self.is_holding_gun() or self.held_prop or self.punch_timer > 0.0 or (self.pickup_reach_timer > 0.0 and not self.held_prop) or self.throw_timer > 0.0 or (self.celebrate_left_timer > 0.0 or self.celebrate_right_timer > 0.0) or not self.footing:
             cur_l = self.arm_pivots["left"].getHpr()
             cur_r = self.arm_pivots["right"].getHpr()
-            self.arm_l_spring.current = Vec3(0, cur_l.y, cur_l.z)
-            self.arm_r_spring.current = Vec3(0, cur_r.y, cur_r.z)
-            self.elbow_l_spring.current = self.elbow_pivots["left"].getP()
-            self.elbow_r_spring.current = self.elbow_pivots["right"].getP()
-            self.arm_l_spring.velocity = Vec3(0, 0, 0)
-            self.arm_r_spring.velocity = Vec3(0, 0, 0)
-            self.elbow_l_spring.velocity = 0.0
-            self.elbow_r_spring.velocity = 0.0
+            self.arm_l_spring.reset(pos=Vec3(0, cur_l.y, cur_l.z), vel=Vec3(0, 0, 0))
+            self.arm_r_spring.reset(pos=Vec3(0, cur_r.y, cur_r.z), vel=Vec3(0, 0, 0))
+            self.elbow_l_spring.reset(pos=self.elbow_pivots["left"].getP(), vel=0.0)
+            self.elbow_r_spring.reset(pos=self.elbow_pivots["right"].getP(), vel=0.0)
 
 
     def get_torso_pos(self):

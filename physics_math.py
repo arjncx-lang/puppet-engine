@@ -106,17 +106,20 @@ class SpringDamper3D:
         self.sx = SpringDamper1D(initial_pos[0], omega, zeta)
         self.sy = SpringDamper1D(initial_pos[1], omega, zeta)
         self.sz = SpringDamper1D(initial_pos[2], omega, zeta)
+        self._out = Vec3(initial_pos[0], initial_pos[1], initial_pos[2])
 
     def reset(self, pos=(0.0, 0.0, 0.0), vel=(0.0, 0.0, 0.0)):
         self.sx.reset(pos[0], vel[0])
         self.sy.reset(pos[1], vel[1])
         self.sz.reset(pos[2], vel[2])
+        self._out.set(pos[0], pos[1], pos[2])
 
     def update(self, target_pos, dt):
         px = self.sx.update(target_pos[0], dt)
         py = self.sy.update(target_pos[1], dt)
         pz = self.sz.update(target_pos[2], dt)
-        return Vec3(px, py, pz)
+        self._out.set(px, py, pz)
+        return self._out
 
     def get_pos(self):
         return Vec3(self.sx.pos, self.sy.pos, self.sz.pos)
@@ -317,21 +320,31 @@ def calculate_lissajous_sway(time_val, freq=1.4, amp_x=0.015, amp_z=0.009):
     return sx, sz
 
 
-def clamp_kinetic_energy(velocity, angular_velocity, mass=6.0, max_energy=2800.0):
+def clamp_kinetic_energy(velocity, angular_velocity, mass=6.0, max_energy=2800.0, max_lin_vel=24.0, max_ang_vel=22.0):
     """
     Energy Conservation & Physics Safety Clamp:
     Guarantees no collision explosion or singularity glitch can shoot objects to infinity.
     E_k = 0.5 * m * v^2
     """
+    # Guard against NaN/Inf glitches
+    if math.isnan(velocity.x) or math.isnan(velocity.y) or math.isnan(velocity.z):
+        velocity = Vec3(0, 0, 0)
+    if math.isnan(angular_velocity.x) or math.isnan(angular_velocity.y) or math.isnan(angular_velocity.z):
+        angular_velocity = Vec3(0, 0, 0)
+
     v_sq = velocity.lengthSquared()
     kinetic_linear = 0.5 * mass * v_sq
     if kinetic_linear > max_energy:
         scale = math.sqrt(max_energy / kinetic_linear)
         velocity = velocity * scale
 
+    # Hard cap on linear velocity to prevent tunnel glitches
+    if velocity.lengthSquared() > max_lin_vel * max_lin_vel:
+        velocity = velocity.normalized() * max_lin_vel
+
     w_sq = angular_velocity.lengthSquared()
-    if w_sq > 484.0:  # 22 rad/s max
-        angular_velocity = angular_velocity * (22.0 / math.sqrt(w_sq))
+    if w_sq > max_ang_vel * max_ang_vel:
+        angular_velocity = angular_velocity.normalized() * max_ang_vel
 
     return velocity, angular_velocity
 
@@ -495,59 +508,73 @@ def calculate_ricochet_reflection(incident_dir, surface_normal, spread=0.15):
     return refl.normalized()
 
 
-def calculate_radial_explosion_impulse(blast_pos, target_pos, max_force, radius, upward_lift=4.5):
+def calculate_radial_explosion_impulse(blast_pos, target_pos, max_force, radius, upward_lift=4.5, max_impulse_cap=90.0):
     """
     Computes radial shockwave impulse from blast center to target position.
     Applies distance attenuation (1 - d/R) and upward kinetic lift.
-    Adapted from A3P entityGroup.explode radial physics.
+    Safe and bounded to prevent singularity or NaN physics crashes.
     Returns (impulse_vector, distance_ratio, is_inside_radius).
     """
     diff = target_pos - blast_pos
     dist = diff.length()
-    if dist >= radius or dist < 0.001:
+    if math.isnan(dist) or dist >= radius:
         return Vec3(0, 0, 0), 0.0, False
-    
+
+    if dist < 0.001:
+        dir_norm = Vec3(0, 0, 1.0)
+        dist = 0.001
+    else:
+        dir_norm = diff / dist
+
     ratio = max(0.0, min(1.0, 1.0 - (dist / radius)))
     # Non-linear shockwave falloff: quadratic pressure drop
     pressure = ratio ** 1.3
-    dir_norm = diff / dist
     linear_impulse = dir_norm * (max_force * pressure) + Vec3(0, 0, upward_lift * pressure)
+    # Bounded impulse cap
+    if linear_impulse.lengthSquared() > max_impulse_cap * max_impulse_cap:
+        linear_impulse = linear_impulse.normalized() * max_impulse_cap
     return linear_impulse, ratio, True
 
 
 def calculate_ballistica_arm_swing(roll_amt, run_gas, is_female=False):
     """
-    Computes Ballistica's quadrature elliptical running arm kinematics (spaz_node.cc:2935-2972).
-    Blends smoothly from relaxed walking sways to high-frequency athletic running pumps:
-    v1run = sin(roll + pi/2) * 0.20, v2run = cos(roll) * 0.30
-    v1 = sin(roll) * 0.05, v2 = cos(roll) * 0.60
-    Returns: ((l_pitch, l_roll, l_elbow), (r_pitch, r_roll, r_elbow))
+    Contralateral Bipedal Running Arm Kinematics:
+    Left arm swings forward in opposition to right leg; right arm in opposition to left leg.
+    Panda3D convention:
+      Pitch < 0: swings arm forward (+Y)
+      Pitch > 0: swings arm backward (-Y)
+      Elbow < 0: flexes forearm forward
     """
     blend = run_gas * run_gas
     inv_blend = 1.0 - run_gas
-    wave_amt = roll_amt
 
-    v1run = math.sin(wave_amt + math.pi * 0.5) * 0.20
-    v2run = math.cos(wave_amt) * 0.30
-    v1 = math.sin(wave_amt) * 0.05
-    v2 = math.cos(wave_amt) * (0.30 if is_female else 0.55)
+    # Gait roll phase: roll_amt == 0 is left foot forward, right foot back.
+    # Therefore, at roll_amt == 0, RIGHT arm swings forward, LEFT arm swings back.
+    # sin(roll_amt): 
+    #   When sin(roll_amt) > 0: left leg is swinging forward, so right arm swings forward (- pitch), left arm back (+ pitch).
+    #   When sin(roll_amt) < 0: right leg is swinging forward, so left arm swings forward (- pitch), right arm back (+ pitch).
+    swing = math.sin(roll_amt)
+    swing_quad = math.cos(roll_amt)
 
-    # Ballistica anchor target mapping
-    anchor_y_left = (-v1run - 0.15) * blend + (-v1 - 0.10) * inv_blend
-    anchor_z_left = (-v2run + 0.15) * blend + (-v2 + 0.10) * inv_blend
+    # Angular amplitudes in degrees
+    walk_amp = 18.0
+    run_amp  = 40.0
+    pitch_amp = walk_amp * inv_blend + run_amp * blend
 
-    anchor_y_right = (v1run - 0.15) * blend + (v1 - 0.10) * inv_blend
-    anchor_z_right = (v2run + 0.15) * blend + (v2 + 0.10) * inv_blend
+    # Contralateral arm pitch (Panda3D: negative pitch = forward reach)
+    l_pitch =  swing * pitch_amp
+    r_pitch = -swing * pitch_amp
 
-    # Convert coordinates to anatomical joint pitch/roll/elbow
-    l_pitch = math.degrees(math.atan2(anchor_z_left, 0.38))
-    r_pitch = math.degrees(math.atan2(anchor_z_right, 0.38))
+    # Elbow flexion: when arm swings forward, elbow flexes forward (up to -55 deg); relaxes on backswing
+    l_forward_factor = max(0.0, -l_pitch / max(1.0, pitch_amp))
+    r_forward_factor = max(0.0, -r_pitch / max(1.0, pitch_amp))
 
-    l_elbow = -14.0 - blend * (38.0 + v1run * 55.0)
-    r_elbow = -14.0 - blend * (38.0 - v1run * 55.0)
+    l_elbow = -14.0 - blend * (16.0 + l_forward_factor * 34.0)
+    r_elbow = -14.0 - blend * (16.0 + r_forward_factor * 34.0)
 
-    l_roll = -10.0 - blend * 6.0
-    r_roll = 10.0 + blend * 6.0
+    # Shoulder roll (outward flaring for athletic posture)
+    l_roll = -9.0 - blend * 6.0 + swing_quad * 3.0 * blend
+    r_roll =  9.0 + blend * 6.0 - swing_quad * 3.0 * blend
 
     return (l_pitch, l_roll, l_elbow), (r_pitch, r_roll, r_elbow)
 
